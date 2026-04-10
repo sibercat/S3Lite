@@ -1,85 +1,138 @@
 # S3 Lite
 
-A lightweight, fast S3 browser for Windows built with C# + WinForms + .NET 10.
+A lightweight, fast S3 browser for Windows built with C# + WinForms + .NET 10. Single executable, ~4.5 MB.
 
-## Features
-
-### Browsing
-- Connect to AWS S3 or any S3-compatible storage (MinIO, Backblaze B2, Cloudflare R2, etc.)
-- Browse buckets and folders with file icons, type descriptions, and storage class
-- Mouse back/forward navigation, keyboard shortcuts (Backspace, Delete, Ctrl+A, Ctrl+U)
-- Real-time file search/filter
-- Dark and Light theme
-
-### File Operations
-- Upload files (toolbar, drag & drop from Explorer)
-- Download files and folders
-- Delete files and folders
-- Rename files and folders (server-side)
-- New folder creation
-- Copy / Move files between buckets (server-side, no bandwidth used)
-
-### Transfers
-- Parallel transfer queue with separate concurrency limits for uploads and downloads
-- Multipart upload with configurable parallel parts and threshold
-- Pause / Resume / Cancel per transfer job
-- Transfer speed and progress display
-
-### GZip Compression
-- Rule-based GZip compression before upload (wildcard bucket + file mask matching)
-- Automatically sets `Content-Encoding: gzip` so browsers decompress transparently
-- Compression ratio shown in File Properties
-
-### File Preview
-- Double-click or right-click → Preview
-- Images: PNG, JPG, WEBP, GIF, BMP and more (up to configurable size limit)
-- Text: TXT, JSON, HTML, CSS, JS, SQL, and more (first 512 KB)
-- Configurable max preview size
-
-### Bucket Management
-- Create buckets (with Object Lock, Block Public Access, Disable ACLs options)
-- Delete buckets (empties all objects first)
-- Bucket Properties dialog (size, object count, versioning, encryption, replication, etc.)
-- Change storage class for all files in a bucket
-- Add external buckets with auto-detect region
-
-### File Properties
-- Right-click → Properties: ETag, size, storage class, last modified, encryption status
-- Shows compression ratio and original file size for GZip-compressed files
-- Owner, version ID, custom metadata
-
-### Permissions & URLs
-- Edit ACL permissions (Owner / Authenticated Users / Everyone)
-- Make Public / Make Private presets
-- Generate pre-signed web URLs with custom expiry and hostname options
-
-### Other
-- Saved connection profiles
-- Auto-connect to last used profile on startup
-- System tray icon with minimize-to-tray support
-- Restore objects from Glacier / Deep Archive
+![Platform](https://img.shields.io/badge/platform-Windows-blue) ![.NET](https://img.shields.io/badge/.NET-10.0-purple) ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Requirements
 
 - Windows 10 / 11
-- [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (Desktop)
+- [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
 
 ## Getting Started
 
 1. Download `S3Lite.exe` from [Releases](../../releases)
 2. Run `S3Lite.exe`
-3. Click **Connect** and enter your AWS credentials or select a saved profile
+3. Click **Connect**, enter your credentials and click **Save Profile**
+
+---
+
+## Features
+
+### Connection & Authentication
+- **Access Key / Secret Key** authentication
+- **Environment variables** (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+- **AWS profile** support (`~/.aws/credentials`)
+- Save and manage multiple named connection profiles
+- **Auto-connect** to last used profile on startup
+- S3-compatible endpoints (MinIO, Backblaze B2, Cloudflare R2, Wasabi, etc.)
+- Force path-style addressing, Dual-Stack (IPv4/IPv6), Transfer Acceleration options
+
+### Bucket Management
+- List, create, and delete buckets
+- **Add external buckets** (buckets you don't own) with auto region detection
+- **Bucket Properties** dialog — owner, creation date, region, object/folder counts, total size, versioning, logging, replication, encryption, Object Lock, requester pays, storage class breakdown, uncompleted multipart uploads
+- **Change storage class** for all objects in a bucket (STANDARD, STANDARD_IA, ONEZONE_IA, GLACIER, GLACIER_IR, DEEP_ARCHIVE, INTELLIGENT_TIERING)
+- **Create bucket options** — Block Public Access, Disable ACLs, Object Lock (Governance / Compliance mode, days or years retention)
+
+### File & Folder Operations
+- Browse buckets and folders with back/forward navigation history
+- **Upload** — toolbar button, or drag and drop files/folders from Windows Explorer
+- **Download** — single file, multi-select, or entire bucket
+- **Delete** files and folders (recursive)
+- **Rename** files and folders (server-side copy + delete)
+- **New folder** creation
+- **Copy / Move** all files to another bucket (server-side, no bandwidth used)
+- **Restore from Glacier** — for GLACIER, DEEP_ARCHIVE, GLACIER_IR objects
+
+### Transfer Queue
+- Parallel upload and download queue with configurable concurrency limits
+- **Multipart uploads** — automatic for files above configurable threshold (default 16 MB)
+- Up to 128 parallel parts per multipart upload
+- **Pause / Resume** transfers (resumes from where it left off using saved upload ID)
+- **Cancel** with automatic multipart cleanup on S3
+- Progress bar showing percentage, part count, file size, and transfer speed
+
+### GZip Compression Rules
+- Rule-based automatic GZip compression before upload
+- Wildcard **bucket mask** (e.g. `*`, `my-bucket`)
+- Wildcard **file mask** (e.g. `*.html`, `*.css`, `assets/*`)
+- Compression **level 1–9** (1 = fastest, 9 = best compression, default 6)
+- Sets `Content-Encoding: gzip` automatically — browsers decompress transparently
+- Stores original file size as metadata — compression ratio shown in File Properties
+
+### File Preview
+- Double-click or right-click → **Preview** (non-modal window)
+- **Images** — PNG, JPG, JPEG, GIF, BMP, WEBP, TIFF, ICO (zoom fit)
+- **Text / Code** — TXT, LOG, MD, JSON, XML, YAML, CSV, HTML, CSS, JS, TS, PY, CS, Java, C/C++, SQL, ENV and more
+- Configurable max preview size (default 10 MB)
+- Handles `Content-Encoding: gzip` transparently
+
+### File Properties
+- Right-click → **Properties** — Name, S3 URI, ETag, Size, Storage class, Last modified, Content type
+- Server-side encryption status (SSE-S3, SSE-KMS, DSSE-KMS)
+- Client-side compression status with **compression ratio** and original file size
+- Owner (from ACL), Version ID, Cache-Control, custom `x-amz-meta-*` metadata
+- Right-click any row to copy value or property + value to clipboard
+
+### Web URL Generator
+- Right-click file(s) → **Generate Web URL**
+- HTTPS toggle
+- Expiration: no expiry / expires in N minutes / expires on exact date
+- Hostname: default AWS dualstack / custom / bucket-as-host
+- Live URL preview, copy to clipboard, multi-file batch
+
+### Permissions (ACL)
+- Right-click file → **Edit Permissions** — Owner / Authenticated Users / Everyone × Read / Write / Read ACL / Write ACL / Full Control
+- **Make Public** and **Make Private** presets
+
+### File List
+- Columns: Name, Size, Last Modified, Type (Windows shell description), Storage Class
+- Click any column header to sort (ascending / descending with ▲/▼ indicator)
+- Folders sorted before files, type and storage class hidden for folders
+- Shell icons per file extension (same as Windows Explorer)
+- Real-time **search/filter** bar
+
+### Keyboard Shortcuts
+| Shortcut | Action |
+|---|---|
+| `Ctrl+A` | Select all files |
+| `Ctrl+U` | Upload files |
+| `Delete` | Delete selected files / folder / bucket |
+| `Backspace` | Navigate up one folder level |
+| Mouse Back Button | Navigate back in history |
+| Mouse Forward Button | Navigate forward in history |
+
+### Options
+**Queueing tab**
+- Max concurrent uploads (1–128, default 3)
+- Max concurrent downloads (1–128, default 3)
+- Parallel parts per multipart upload (1–128, default 4)
+- Multipart upload threshold (5–5120 MB, default 16 MB)
+
+**Interface tab**
+- Dark / Light theme (requires restart)
+- Show icon in system tray
+- Minimize to system tray
+- Bucket pagination page size (100–1000)
+- Max file size for preview (1–500 MB)
+
+---
 
 ## Building from Source
 
+Requires [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
+
 ```
+git clone https://github.com/sibercat/S3Lite.git
+cd S3Lite
 dotnet publish -c Release -o publish_lite
 ```
 
-Requires .NET 10 SDK.
+Output: `publish_lite\S3Lite.exe` (~4.5 MB, framework-dependent single file)
 
 ## Tech Stack
 
-- C# / WinForms / .NET 10
-- AWS SDK for .NET v4
-- Single-file publish (~4 MB, framework-dependent)
+- **C# / WinForms / .NET 10** — native Windows UI
+- **AWS SDK for .NET v4** — S3 operations
+- **Single-file publish** — no installer needed
