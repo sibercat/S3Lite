@@ -1,5 +1,5 @@
 # S3 Lite
-
+![Dashboard](https://raw.githubusercontent.com/sibercat/S3Lite/refs/heads/main/preview.webp)
 A lightweight, fast S3 browser for Windows built with C# + WinForms + .NET 10. Single executable, ~4.5 MB.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-blue) ![.NET](https://img.shields.io/badge/.NET-10.0-purple) ![License](https://img.shields.io/badge/license-MIT-green)
