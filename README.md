@@ -82,4 +82,4 @@ Requires .NET 10 SDK.
 
 - C# / WinForms / .NET 10
 - AWS SDK for .NET v4
-- Single-file publish (~2 MB, framework-dependent)
+- Single-file publish (~4 MB, framework-dependent)
