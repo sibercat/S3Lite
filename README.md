@@ -38,7 +38,7 @@ A lightweight, fast S3 browser for Windows built with C# + WinForms + .NET 10. S
 ### File & Folder Operations
 - Browse buckets and folders with back/forward navigation history
 - **Upload** — toolbar button, or drag and drop files/folders from Windows Explorer
-- **Download** — single file, multi-select, or entire bucket
+- **Download** — single file, multi-select, folders (recursive, preserves directory structure), or entire bucket
 - **Delete** files and folders (recursive)
 - **Rename** files and folders (server-side copy + delete)
 - **New folder** creation
@@ -96,12 +96,19 @@ A lightweight, fast S3 browser for Windows built with C# + WinForms + .NET 10. S
 ### Keyboard Shortcuts
 | Shortcut | Action |
 |---|---|
+| `Enter` | Open folder / preview file |
 | `Ctrl+A` | Select all files |
 | `Ctrl+U` | Upload files |
 | `Delete` | Delete selected files / folder / bucket |
 | `Backspace` | Navigate up one folder level |
+| `A`–`Z` | Jump to next file or folder starting with that letter |
 | Mouse Back Button | Navigate back in history |
 | Mouse Forward Button | Navigate forward in history |
+
+### Update Checker
+- Automatically checks for new releases on startup (GitHub API)
+- A **green "⬆ Update available"** label appears in the status bar when a newer version is found
+- Click it to open the releases page
 
 ### Options
 **Queueing tab**
