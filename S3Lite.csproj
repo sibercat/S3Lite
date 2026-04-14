@@ -10,9 +10,9 @@
     <SelfContained>false</SelfContained>
 
     <!-- Version info shown in File Properties → Details -->
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Product>S3 Lite</Product>
     <Description>Lightweight S3 Browser</Description>
     <Copyright>Copyright © 2026</Copyright>

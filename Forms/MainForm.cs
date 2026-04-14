@@ -52,9 +52,17 @@ public class MainForm : Form
 
     private StatusStrip statusStrip = null!;
     private ToolStripStatusLabel statusLabel = null!;
+    private readonly ToolStripStatusLabel _updateLabel = new()
+    {
+        IsLink    = true,
+        Visible   = false,
+        Alignment = ToolStripItemAlignment.Right,
+        LinkColor = Color.DodgerBlue,
+        ToolTipText = "Click to open releases page"
+    };
 
     // --- Transfer panel controls ---
-    private ListView lvTransfers = null!;
+    private FileListView lvTransfers = null!;
     private Button btnPauseJob = null!;
     private Button btnResumeJob = null!;
     private Button btnCancelJob = null!;
@@ -197,6 +205,7 @@ public class MainForm : Form
         statusLabel = new ToolStripStatusLabel { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
         statusStrip = new StatusStrip();
         statusStrip.Items.Add(statusLabel);
+        statusStrip.Items.Add(_updateLabel);
 
         // ── Path label ────────────────────────────────────────────────────────
         lblPath = new Label
@@ -426,7 +435,7 @@ public class MainForm : Form
         splitMain.Panel2.Controls.Add(filesPanel);
 
         // ── Transfer panel ────────────────────────────────────────────────────
-        lvTransfers = new ListView
+        lvTransfers = new FileListView
         {
             Dock = DockStyle.Fill,
             View = View.Details,
@@ -451,8 +460,10 @@ public class MainForm : Form
             TextRenderer.DrawText(e.Graphics, e.Header?.Text ?? "", lvTransfers.Font, padded,
                 SystemColors.ControlText,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            using var p = new Pen(SystemColors.ControlDark, 1);
+            e.Graphics.DrawLine(p, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
         };
-        lvTransfers.DrawItem += (_, e) => e.DrawDefault = true;
+        lvTransfers.DrawItem += (_, _) => { };
         lvTransfers.DrawSubItem      += LvTransfers_DrawSubItem;
         lvTransfers.SelectedIndexChanged += (_, _) => UpdateTransferButtons();
 
@@ -525,6 +536,7 @@ public class MainForm : Form
         Load        += (_, _) => Application.AddMessageFilter(_mouseNavFilter = new MouseNavFilter(this));
         Load        += (_, _) => _ = AutoConnectAsync();
         Load        += (_, _) => SetupTrayIcon();
+        Load        += (_, _) => _ = CheckForUpdateAsync();
         Resize      += MainForm_Resize;
         FormClosing += MainForm_FormClosing;
     }
@@ -582,12 +594,22 @@ public class MainForm : Form
     // ── OwnerDraw transfer rows ───────────────────────────────────────────────
     private void LvTransfers_DrawSubItem(object? sender, DrawListViewSubItemEventArgs e)
     {
-        var r   = e.Bounds;
         var g   = e.Graphics;
         bool sel = (e.ItemState & ListViewItemStates.Selected) != 0;
 
+        // Windows extends the last column's bounds to the right edge of the control.
+        // Clip every cell to the sum of all defined column widths so nothing draws past that.
+        int totalW   = lvTransfers.Columns.Cast<ColumnHeader>().Sum(c => c.Width);
+        int cellRight = Math.Min(e.Bounds.Right, totalW);
+        var r = new Rectangle(e.Bounds.X, e.Bounds.Y, Math.Max(0, cellRight - e.Bounds.X), e.Bounds.Height);
+
+        // Fill overflow area (past last column) with BackColor
+        if (e.Bounds.Right > cellRight)
+            g.FillRectangle(new SolidBrush(lvTransfers.BackColor),
+                cellRight, e.Bounds.Y, e.Bounds.Right - cellRight, e.Bounds.Height);
+
         // Background
-        Color back = sel ? SystemColors.Highlight : SystemColors.Window;
+        Color back = sel ? SystemColors.Highlight : lvTransfers.BackColor;
         g.FillRectangle(new SolidBrush(back), r);
 
         Color fore = sel ? SystemColors.HighlightText : (e.Item?.ForeColor ?? lvTransfers.ForeColor);
@@ -635,6 +657,14 @@ public class MainForm : Form
             var padded = Rectangle.FromLTRB(r.Left + 3, r.Top, r.Right, r.Bottom);
             TextRenderer.DrawText(g, text, lvTransfers.Font, padded, fore, flags);
         }
+
+        // Grid lines — r is clipped so lines stop at the actual column boundary
+        bool isLast = e.ColumnIndex == lvTransfers.Columns.Count - 1;
+        Color line = _settings.Theme == "Dark" ? Color.FromArgb(42, 42, 42) : Color.FromArgb(225, 225, 225);
+        using var pen = new Pen(line, 1);
+        g.DrawLine(pen, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1); // horizontal
+        if (!isLast)
+            g.DrawLine(pen, r.Right - 1, r.Top, r.Right - 1, r.Bottom); // vertical (skip on last col)
     }
 
     // ── Factory ───────────────────────────────────────────────────────────────
@@ -986,6 +1016,7 @@ public class MainForm : Form
     {
         if (e.KeyCode == Keys.Delete)                    ToolStripDelete_Click(sender, e);
         if (e.KeyCode == Keys.Back)                      _ = NavigateUpAsync();
+        if (e.KeyCode == Keys.Return)                    { e.Handled = true; e.SuppressKeyPress = true; LvFiles_DoubleClick(sender, e); }
         if (e.KeyCode == Keys.A     && e.Control)        { lvFiles.Items.Cast<ListViewItem>().ToList().ForEach(i => i.Selected = true); e.Handled = true; }
         if (e.KeyCode == Keys.U     && e.Control)        { e.Handled = true; BeginInvoke(ToolStripUpload_Click, this, EventArgs.Empty); }
     }
@@ -1706,6 +1737,36 @@ public class MainForm : Form
     }
 
     private void SetStatus(string msg) => statusLabel.Text = msg;
+
+    // ── GitHub update check ───────────────────────────────────────────────────
+    private static readonly HttpClient _http = new HttpClient();
+    private async Task CheckForUpdateAsync()
+    {
+        try
+        {
+            _http.DefaultRequestHeaders.UserAgent.TryParseAdd("S3Lite-UpdateCheck/1.0");
+            var json = await _http.GetStringAsync(
+                "https://api.github.com/repos/sibercat/S3Lite/releases/latest");
+
+            // Parse tag_name without a JSON library — it's always a short string
+            var match = System.Text.RegularExpressions.Regex.Match(json, @"""tag_name""\s*:\s*""([^""]+)""");
+            if (!match.Success) return;
+
+            string tag = match.Groups[1].Value.TrimStart('v', 'V');
+            if (!Version.TryParse(tag, out var latest)) return;
+
+            var current = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+            if (current == null || latest <= current) return;
+
+            // Newer version available — show clickable label in status bar
+            _updateLabel.Text    = $"⬆ Update available: v{latest.Major}.{latest.Minor}.{latest.Build}";
+            _updateLabel.Visible = true;
+            _updateLabel.Click  += (_, _) =>
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                    "https://github.com/sibercat/S3Lite/releases") { UseShellExecute = true });
+        }
+        catch { /* silent — no internet, API rate limit, etc. */ }
+    }
 
     private void UpdatePathLabel()
     {
