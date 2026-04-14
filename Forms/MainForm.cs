@@ -323,6 +323,7 @@ public class MainForm : Form
         lvFiles.DrawSubItem += LvFiles_DrawSubItem;
         lvFiles.DoubleClick   += LvFiles_DoubleClick;
         lvFiles.KeyDown       += LvFiles_KeyDown;
+        lvFiles.KeyPress      += LvFiles_KeyPress;
         lvFiles.ColumnClick   += LvFiles_ColumnClick;
         lvFiles.AllowDrop    =  true;
         lvFiles.DragEnter    += LvFiles_DragEnter;
@@ -1021,6 +1022,36 @@ public class MainForm : Form
         if (e.KeyCode == Keys.U     && e.Control)        { e.Handled = true; BeginInvoke(ToolStripUpload_Click, this, EventArgs.Empty); }
     }
 
+    private void LvFiles_KeyPress(object? sender, KeyPressEventArgs e)
+    {
+        if (char.IsControl(e.KeyChar)) return; // ignore Ctrl combos, Enter, Backspace etc.
+        e.Handled = true; // suppress native search (folders start with '[' so it fails)
+
+        char ch = char.ToUpperInvariant(e.KeyChar);
+        var all = lvFiles.Items.Cast<ListViewItem>()
+            .Where(i => i.Tag is S3Item)   // skip '..' row
+            .ToList();
+        if (all.Count == 0) return;
+
+        // Find the next item after the current selection that starts with this letter
+        int startIdx = lvFiles.SelectedItems.Count > 0
+            ? all.IndexOf(lvFiles.SelectedItems[lvFiles.SelectedItems.Count - 1]) + 1
+            : 0;
+
+        // Actual name: strip [ ] brackets used for folder display
+        static string ActualName(ListViewItem lvi) =>
+            lvi.Tag is S3Item s ? s.Name.TrimEnd('/') : lvi.Text;
+
+        // Search from current position, then wrap around
+        var match = all.Skip(startIdx).FirstOrDefault(i => char.ToUpperInvariant(ActualName(i)[0]) == ch)
+                 ?? all.FirstOrDefault(i => char.ToUpperInvariant(ActualName(i)[0]) == ch);
+
+        if (match == null) return;
+        lvFiles.SelectedItems.Clear();
+        match.Selected = true;
+        match.EnsureVisible();
+    }
+
     // ── Mouse back/forward buttons ────────────────────────────────────────────
     // WndProc only fires when the form itself has focus; use IMessageFilter so
     // XButton messages are caught even when a child control (e.g. lvFiles) is focused.
@@ -1138,29 +1169,43 @@ public class MainForm : Form
     // ── Download ──────────────────────────────────────────────────────────────
     private void ToolStripDownload_Click(object? sender, EventArgs e) => BeginInvoke(DoDownload);
 
-    private void DoDownload()
+    private async void DoDownload()
     {
-        if (_transferManager == null || lvFiles.SelectedItems.Count == 0) return;
+        if (_s3 == null || _transferManager == null || lvFiles.SelectedItems.Count == 0) return;
 
-        var files = lvFiles.SelectedItems.Cast<ListViewItem>()
-            .Where(i => i.Tag is S3Item { Type: S3ItemType.File })
+        var selected = lvFiles.SelectedItems.Cast<ListViewItem>()
+            .Where(i => i.Tag is S3Item)
             .Select(i => (S3Item)i.Tag!)
             .ToList();
 
-        if (files.Count == 0)
-        {
-            MessageBox.Show("Select file(s) to download.", "Download", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
+        if (selected.Count == 0) return;
 
         var defaultPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         var destFolder  = FolderPicker.Pick(Handle, defaultPath);
         if (string.IsNullOrWhiteSpace(destFolder)) return;
 
-        foreach (var item in files)
+        foreach (var item in selected)
         {
-            var localPath = Path.Combine(destFolder, item.Name);
-            _transferManager.Enqueue(TransferDirection.Download, _currentBucket, item.Key, localPath);
+            if (item.Type == S3ItemType.File)
+            {
+                var localPath = Path.Combine(destFolder, item.Name);
+                _transferManager.Enqueue(TransferDirection.Download, _currentBucket, item.Key, localPath);
+            }
+            else if (item.Type == S3ItemType.Folder)
+            {
+                // Recursively list all files under the folder prefix (no delimiter = all levels)
+                SetStatus($"Enqueuing folder {item.Name}…");
+                var children = await _s3.ListAllObjectsAsync(_currentBucket, item.Key);
+                foreach (var child in children)
+                {
+                    // Strip the folder's own prefix to get the relative path inside it
+                    var relative  = child.Key.Substring(item.Key.Length).Replace('/', Path.DirectorySeparatorChar);
+                    var localPath = Path.Combine(destFolder, item.Name.TrimEnd('/'), relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                    _transferManager.Enqueue(TransferDirection.Download, _currentBucket, child.Key, localPath);
+                }
+                SetStatus($"Queued {children.Count} file(s) from {item.Name}");
+            }
         }
     }
 

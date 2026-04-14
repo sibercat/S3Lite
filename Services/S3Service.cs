@@ -96,10 +96,13 @@ public class S3Service : IDisposable
     }
 
     /// <summary>Flat list of every file in the bucket (no folder markers).</summary>
-    public async Task<List<S3Item>> ListAllObjectsAsync(string bucket)
+    public Task<List<S3Item>> ListAllObjectsAsync(string bucket) =>
+        ListAllObjectsAsync(bucket, prefix: null);
+
+    public async Task<List<S3Item>> ListAllObjectsAsync(string bucket, string? prefix)
     {
         var items = new List<S3Item>();
-        var request = new ListObjectsV2Request { BucketName = bucket };
+        var request = new ListObjectsV2Request { BucketName = bucket, Prefix = prefix ?? "" };
         ListObjectsV2Response resp;
         do
         {
