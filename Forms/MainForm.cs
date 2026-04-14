@@ -54,10 +54,12 @@ public class MainForm : Form
     private ToolStripStatusLabel statusLabel = null!;
     private readonly ToolStripStatusLabel _updateLabel = new()
     {
-        IsLink    = true,
-        Visible   = false,
-        Alignment = ToolStripItemAlignment.Right,
-        LinkColor = Color.DodgerBlue,
+        IsLink      = true,
+        Visible     = false,
+        Alignment   = ToolStripItemAlignment.Right,
+        LinkColor   = Color.LimeGreen,
+        ActiveLinkColor = Color.LimeGreen,
+        Font        = new Font(SystemFonts.DefaultFont, FontStyle.Bold),
         ToolTipText = "Click to open releases page"
     };
 
