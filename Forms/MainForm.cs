@@ -49,6 +49,7 @@ public class MainForm : Form
     // Column sort state
     private int  _sortColumn    = 0;   // 0=Name, 1=Size, 2=Date
     private bool _sortAscending = true;
+    private bool _refreshPending = false; // debounce concurrent upload-complete refreshes
 
     private StatusStrip statusStrip = null!;
     private ToolStripStatusLabel statusLabel = null!;
@@ -542,6 +543,7 @@ public class MainForm : Form
         Load        += (_, _) => _ = CheckForUpdateAsync();
         Resize      += MainForm_Resize;
         FormClosing += MainForm_FormClosing;
+        Activated   += (_, _) => lvFiles.Invalidate(); // fix blank list on refocus
     }
 
     // ── OwnerDraw file rows ───────────────────────────────────────────────────
@@ -1721,9 +1723,18 @@ public class MainForm : Form
         lvTransfers.Invalidate(lvi.Bounds);
         UpdateTransferButtons();
 
-        // Refresh file list when an upload completes
-        if (job.Direction == TransferDirection.Upload && job.Status == TransferStatus.Completed)
-            _ = LoadFilesAsync();
+        // Refresh file list when an upload completes.
+        // Debounced — multiple jobs completing at once share one refresh to avoid race/duplicates.
+        if (job.Direction == TransferDirection.Upload && job.Status == TransferStatus.Completed
+            && !_refreshPending)
+        {
+            _refreshPending = true;
+            _ = Task.Delay(400).ContinueWith(_ => BeginInvoke(async () =>
+            {
+                _refreshPending = false;
+                if (!string.IsNullOrEmpty(_currentBucket)) await LoadFilesAsync();
+            }));
+        }
     }
 
     // ── Transfer actions ──────────────────────────────────────────────────────
