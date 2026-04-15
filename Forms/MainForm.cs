@@ -71,6 +71,11 @@ public class MainForm : Form
     private Button btnCancelJob = null!;
     private Button btnClearCompleted = null!;
 
+    private TransferStatus? _activeFilter = null; // null = All
+    private readonly Label[] _tabLabels = new Label[5];
+    private Font _tabFontNormal = null!;
+    private Font _tabFontBold   = null!;
+
     private readonly Dictionary<Guid, ListViewItem> _jobItems = new();
 
     // Column indices in lvTransfers
@@ -506,9 +511,62 @@ public class MainForm : Form
             Font = new Font(Font.FontFamily, 8.5f, FontStyle.Bold)
         };
 
+        // ── Filter tab bar ────────────────────────────────────────────────────
+        var pnlFilterBar = new FlowLayoutPanel
+        {
+            Dock          = DockStyle.Top,
+            Height        = 25,
+            BackColor     = _isDark ? Color.FromArgb(38, 38, 38) : Color.FromArgb(228, 228, 228),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents  = false,
+            Padding       = new Padding(4, 3, 0, 0),
+        };
+
+        (string name, TransferStatus? filter)[] tabDefs =
+        {
+            ("All",       null),
+            ("Running",   TransferStatus.Running),
+            ("Queued",    TransferStatus.Pending),
+            ("Completed", TransferStatus.Completed),
+            ("Failed",    TransferStatus.Failed),
+        };
+
+        _tabFontNormal = new Font(Font.FontFamily, 8f, FontStyle.Regular);
+        _tabFontBold   = new Font(Font.FontFamily, 8f, FontStyle.Bold);
+
+        for (int i = 0; i < tabDefs.Length; i++)
+        {
+            int idx = i;
+            var lbl = new Label
+            {
+                Text      = $" {tabDefs[i].name} (0) ",
+                AutoSize  = true,
+                Margin    = new Padding(0, 0, 2, 0),
+                Padding   = new Padding(2, 0, 2, 0),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor    = Cursors.Hand,
+                Font      = i == 0 ? _tabFontBold : _tabFontNormal,
+                ForeColor = i == 0
+                    ? (_isDark ? Color.White : Color.Black)
+                    : (_isDark ? Color.Silver : SystemColors.ControlDark),
+                BackColor = i == 0
+                    ? (_isDark ? Color.FromArgb(55, 55, 55) : SystemColors.Window)
+                    : Color.Transparent,
+            };
+            lbl.Click += (_, _) =>
+            {
+                _activeFilter = tabDefs[idx].filter;
+                ApplyTransferFilter();
+                UpdateFilterTabs();
+            };
+            _tabLabels[i] = lbl;
+            pnlFilterBar.Controls.Add(lbl);
+        }
+
         var pnlTransfers = new Panel { Dock = DockStyle.Fill };
         pnlTransfers.Controls.Add(lvTransfers);
         pnlTransfers.Controls.Add(pnlTransferActions);
+        pnlTransfers.Controls.Add(pnlFilterBar);
         pnlTransfers.Controls.Add(lblTransferHeader);
 
         // ── Outer split (top = browser, bottom = transfers) ───────────────────
@@ -1643,11 +1701,13 @@ public class MainForm : Form
         lvi.SubItems.Add("");   // speed
 
         _jobItems[job.Id] = lvi;
-        lvTransfers.Items.Add(lvi);
+        if (JobMatchesFilter(job))
+            lvTransfers.Items.Add(lvi);
 
         if (splitOuter.Panel2Collapsed)
             splitOuter.Panel2Collapsed = false;
 
+        UpdateFilterTabs();
         UpdateTransferButtons();
     }
 
@@ -1702,6 +1762,7 @@ public class MainForm : Form
             _speedSamples.Remove(job.Id);
         }
 
+        string oldStatusText = lvi.SubItems[TColStatus].Text;
         lvi.SubItems[TColStatus].Text = job.Status.ToString();
         lvi.SubItems[TColSize].Text   = job.TotalBytes > 0
             ? $"{FormatBytes(job.TransferredBytes)} / {FormatBytes(job.TotalBytes)}"
@@ -1719,6 +1780,19 @@ public class MainForm : Form
             TransferStatus.Paused    => dark ? Color.Orange      : Color.DarkOrange,
             _                        => SystemColors.ControlText
         };
+
+        // Update filter visibility if status changed
+        bool statusChanged = oldStatusText != lvi.SubItems[TColStatus].Text;
+        if (statusChanged)
+        {
+            bool shouldShow = JobMatchesFilter(job);
+            bool isShown    = lvTransfers.Items.Contains(lvi);
+            if (shouldShow && !isShown)
+                lvTransfers.Items.Add(lvi);
+            else if (!shouldShow && isShown)
+                lvTransfers.Items.Remove(lvi);
+            UpdateFilterTabs();
+        }
 
         lvTransfers.Invalidate(lvi.Bounds);
         UpdateTransferButtons();
@@ -1743,17 +1817,23 @@ public class MainForm : Form
 
     private void PauseSelected()
     {
-        if (SelectedJob is { } job) _transferManager?.Pause(job);
+        if (_transferManager == null) return;
+        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Running or TransferStatus.Pending).ToList())
+            _transferManager.Pause(job);
     }
 
     private void ResumeSelected()
     {
-        if (SelectedJob is { } job) _transferManager?.Resume(job);
+        if (_transferManager == null) return;
+        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Paused or TransferStatus.Failed).ToList())
+            _transferManager.Resume(job);
     }
 
     private void CancelSelected()
     {
-        if (SelectedJob is { } job) _transferManager?.Cancel(job);
+        if (_transferManager == null) return;
+        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused).ToList())
+            _transferManager.Cancel(job);
     }
 
     private void ClearCompleted()
@@ -1769,15 +1849,82 @@ public class MainForm : Form
                 _jobItems.Remove(id);
             }
         }
+        UpdateFilterTabs();
         UpdateTransferButtons();
     }
 
     private void UpdateTransferButtons()
     {
-        var job = SelectedJob;
-        btnPauseJob.Enabled  = job?.Status is TransferStatus.Running or TransferStatus.Pending;
-        btnResumeJob.Enabled = job?.Status is TransferStatus.Paused or TransferStatus.Failed;
-        btnCancelJob.Enabled = job?.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused;
+        var jobs = _transferManager?.Jobs ?? (IReadOnlyList<TransferJob>)Array.Empty<TransferJob>();
+        btnPauseJob.Enabled  = jobs.Any(j => j.Status is TransferStatus.Running or TransferStatus.Pending);
+        btnResumeJob.Enabled = jobs.Any(j => j.Status is TransferStatus.Paused or TransferStatus.Failed);
+        btnCancelJob.Enabled = jobs.Any(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused);
+    }
+
+    private bool JobMatchesFilter(TransferJob job)
+    {
+        if (_activeFilter == null) return true;
+        if (_activeFilter == TransferStatus.Failed)
+            return job.Status is TransferStatus.Failed or TransferStatus.Cancelled;
+        return job.Status == _activeFilter;
+    }
+
+    private void ApplyTransferFilter()
+    {
+        // Remember which job was selected so we can restore it after rebuilding the list
+        var selectedJob = SelectedJob;
+
+        lvTransfers.BeginUpdate();
+        lvTransfers.Items.Clear();
+        foreach (var lvi in _jobItems.Values)
+        {
+            if (lvi.Tag is TransferJob job && JobMatchesFilter(job))
+                lvTransfers.Items.Add(lvi);
+        }
+        lvTransfers.EndUpdate();
+
+        // Restore selection if the previously selected job is still visible
+        if (selectedJob != null && _jobItems.TryGetValue(selectedJob.Id, out var selLvi)
+            && lvTransfers.Items.Contains(selLvi))
+        {
+            selLvi.Selected = true;
+            selLvi.EnsureVisible();
+        }
+
+        UpdateTransferButtons();
+    }
+
+    private void UpdateFilterTabs()
+    {
+        if (_tabLabels[0] == null) return; // not yet initialized
+
+        int all       = _jobItems.Count;
+        int running   = _jobItems.Values.Count(lvi => (lvi.Tag as TransferJob)?.Status == TransferStatus.Running);
+        int queued    = _jobItems.Values.Count(lvi => (lvi.Tag as TransferJob)?.Status == TransferStatus.Pending);
+        int completed = _jobItems.Values.Count(lvi => (lvi.Tag as TransferJob)?.Status == TransferStatus.Completed);
+        int failed    = _jobItems.Values.Count(lvi =>
+            (lvi.Tag as TransferJob)?.Status is TransferStatus.Failed or TransferStatus.Cancelled);
+
+        int[]              counts  = { all, running, queued, completed, failed };
+        string[]           names   = { "All", "Running", "Queued", "Completed", "Failed" };
+        TransferStatus?[]  filters = { null, TransferStatus.Running, TransferStatus.Pending,
+                                       TransferStatus.Completed, TransferStatus.Failed };
+        bool dark = _settings.Theme == "Dark";
+
+        for (int i = 0; i < _tabLabels.Length; i++)
+        {
+            if (_tabLabels[i] == null) continue;
+            _tabLabels[i].Text = $" {names[i]} ({counts[i]}) ";
+
+            bool active = _activeFilter == filters[i];
+            _tabLabels[i].Font      = active ? _tabFontBold : _tabFontNormal;
+            _tabLabels[i].ForeColor = active
+                ? (dark ? Color.White   : Color.Black)
+                : (dark ? Color.Silver  : SystemColors.ControlDark);
+            _tabLabels[i].BackColor = active
+                ? (dark ? Color.FromArgb(55, 55, 55) : SystemColors.Window)
+                : Color.Transparent;
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
