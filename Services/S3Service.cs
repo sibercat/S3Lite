@@ -992,7 +992,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
             return $"{_connection.EndpointUrl.TrimEnd('/')}/{bucket}/{key}";
 
         string region = string.IsNullOrWhiteSpace(_connection.Region) ? "us-east-1" : _connection.Region;
-        return $"{scheme}://{bucket}.s3.dualstack.{region}.amazonaws.com/{key}";
+        return $"{scheme}://s3.dualstack.{region}.amazonaws.com/{bucket}/{key}";
     }
 
     public string DefaultHostname(string bucket, bool https = true)
@@ -1001,7 +1001,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         if (!string.IsNullOrWhiteSpace(_connection.EndpointUrl))
             return _connection.EndpointUrl.TrimEnd('/') + "/";
         string region = string.IsNullOrWhiteSpace(_connection.Region) ? "us-east-1" : _connection.Region;
-        return $"{scheme}://{bucket}.s3.dualstack.{region}.amazonaws.com/";
+        return $"{scheme}://s3.dualstack.{region}.amazonaws.com/{bucket}/";
     }
 
     public string GetPreSignedUrl(string bucket, string key, DateTime expiresAt, bool https = true)
