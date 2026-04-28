@@ -8,9 +8,9 @@ public class AclForm : Form
 {
     private readonly S3Service _s3;
     private readonly string _bucket;
-    private readonly string _key;
+    private readonly List<string> _keys;
 
-    // Set on successful load
+    // Set on successful load (single-file mode only)
     private Owner?  _owner;
     private List<S3Grant> _loadedGrants = new();
 
@@ -25,11 +25,11 @@ public class AclForm : Form
     private const string AuthUri = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private const string AllUri  = "http://acs.amazonaws.com/groups/global/AllUsers";
 
-    public AclForm(S3Service s3, string bucket, string key)
+    public AclForm(S3Service s3, string bucket, IEnumerable<string> keys)
     {
         _s3     = s3;
         _bucket = bucket;
-        _key    = key;
+        _keys   = keys.ToList();
         InitializeComponent();
     }
 
@@ -42,9 +42,12 @@ public class AclForm : Form
         MaximizeBox     = false;
         MinimizeBox     = false;
 
+        string keyLabel = _keys.Count == 1
+            ? $"Key: {_keys[0]}"
+            : $"Applying to {_keys.Count} files";
         Controls.Add(new Label
         {
-            Text      = $"Key: {_key}",
+            Text      = keyLabel,
             Left      = 10, Top = 10,
             Width     = 575, Height = 18,
             Font      = new Font(Font.FontFamily, 8.5f),
@@ -160,7 +163,10 @@ public class AclForm : Form
         Controls.AddRange(new Control[] { btnPublic, btnPrivate, btnSave, btnClose });
         CancelButton = btnClose;
 
-        Load += async (_, _) => await LoadAsync();
+        if (_keys.Count == 1)
+            Load += async (_, _) => await LoadAsync();
+        else
+            Load += (_, _) => EnableMultiMode();
     }
 
     // ── Load ──────────────────────────────────────────────────────────────────
@@ -168,7 +174,7 @@ public class AclForm : Form
     {
         try
         {
-            var resp     = await _s3.GetAclAsync(_bucket, _key);
+            var resp     = await _s3.GetAclAsync(_bucket, _keys[0]);
             _owner        = resp.Owner;
             _loadedGrants = resp.Grants ?? new List<S3Grant>();
             PopulateGrid(_loadedGrants, _owner?.Id ?? "");
@@ -183,6 +189,15 @@ public class AclForm : Form
         {
             SetStatus($"Error loading ACL: {ex.Message}", error: true);
         }
+    }
+
+    private void EnableMultiMode()
+    {
+        SetStatus($"Set permissions to apply to all {_keys.Count} files, then press Save.");
+        EnableChecks(true);
+        btnSave.Enabled    = true;
+        _btnPublic.Enabled  = true;
+        _btnPrivate.Enabled = true;
     }
 
     private void PopulateGrid(List<S3Grant> grants, string ownerId)
@@ -217,29 +232,51 @@ public class AclForm : Form
     private async void BtnSave_Click(object? sender, EventArgs e)
     {
         btnSave.Enabled = false;
-        SetStatus("Saving…");
 
-        try
+        if (_keys.Count == 1)
         {
-            var acl = BuildAcl();
-            await _s3.PutAclAsync(_bucket, _key, acl);
-            _loadedGrants = acl.Grants ?? new List<S3Grant>();
-            SetStatus("Permissions saved.", success: true);
+            SetStatus("Saving…");
+            try
+            {
+                var acl = BuildAcl(_owner);
+                await _s3.PutAclAsync(_bucket, _keys[0], acl);
+                _loadedGrants = acl.Grants ?? new List<S3Grant>();
+                SetStatus("Permissions saved.", success: true);
+            }
+            catch (Exception ex)
+            {
+                SetStatus($"Error saving ACL: {ex.Message}", error: true);
+            }
+            finally { btnSave.Enabled = true; }
         }
-        catch (Exception ex)
+        else
         {
-            SetStatus($"Error saving ACL: {ex.Message}", error: true);
-        }
-        finally
-        {
+            int done = 0, failed = 0;
+            SetStatus($"Saving 0 / {_keys.Count}…");
+            await Task.WhenAll(_keys.Select(async key =>
+            {
+                try
+                {
+                    var resp = await _s3.GetAclAsync(_bucket, key);
+                    var acl  = BuildAcl(resp.Owner);
+                    await _s3.PutAclAsync(_bucket, key, acl);
+                    Interlocked.Increment(ref done);
+                }
+                catch { Interlocked.Increment(ref failed); }
+                SetStatus($"Saving {done + failed} / {_keys.Count}…");
+            }));
+            if (failed == 0)
+                SetStatus($"Permissions saved for all {_keys.Count} files.", success: true);
+            else
+                SetStatus($"Done: {done} saved, {failed} failed.", error: true);
             btnSave.Enabled = true;
         }
     }
 
-    private S3AccessControlList BuildAcl()
+    private S3AccessControlList BuildAcl(Owner? owner)
     {
-        string ownerId   = _owner?.Id          ?? "";
-        string ownerName = _owner?.DisplayName ?? "";
+        string ownerId   = owner?.Id          ?? "";
+        string ownerName = owner?.DisplayName ?? "";
 
         // S3Grantee.Type is computed from whichever property is set
         S3Grantee[] grantees =
@@ -255,7 +292,7 @@ public class AclForm : Form
             S3Permission.READ_ACP, S3Permission.WRITE_ACP
         };
 
-        var result = new S3AccessControlList { Owner = _owner };
+        var result = new S3AccessControlList { Owner = owner };
 
         for (int r = 0; r < 3; r++)
         {

@@ -403,7 +403,7 @@ public class MainForm : Form
                                 (si.StorageClass == "GLACIER" || si.StorageClass == "DEEP_ARCHIVE" || si.StorageClass == "GLACIER_IR");
             ctxPreview.Enabled    = singleFile;
             ctxRename.Enabled     = singleFile || singleFolder;
-            ctxAcl.Enabled        = singleFile;
+            ctxAcl.Enabled        = anyFile;
             ctxRestore.Visible    = isGlacier;
             ctxRestore.Enabled    = isGlacier;
             ctxFileClass.Enabled  = anyFile;
@@ -1160,11 +1160,12 @@ public class MainForm : Form
             }
             else if (Directory.Exists(path))
             {
+                string folderName = Path.GetFileName(path);
                 foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
                 {
-                    var relative = Path.GetRelativePath(Path.GetDirectoryName(path)!, file).Replace('\\', '/');
+                    var relative = Path.GetRelativePath(path, file).Replace('\\', '/');
                     _transferManager.Enqueue(TransferDirection.Upload, _currentBucket,
-                        _currentPrefix + Path.GetFileName(path) + "/" + relative, file);
+                        _currentPrefix + folderName + "/" + relative, file);
                 }
             }
         }
@@ -1677,10 +1678,14 @@ public class MainForm : Form
     private void DoAcl()
     {
         if (_s3 == null) return;
-        if (lvFiles.SelectedItems.Count != 1) return;
-        if (lvFiles.SelectedItems[0].Tag is not S3Item { Type: S3ItemType.File } item) return;
+        var keys = lvFiles.SelectedItems.Cast<ListViewItem>()
+            .Select(lvi => lvi.Tag as S3Item)
+            .Where(item => item?.Type == S3ItemType.File)
+            .Select(item => item!.Key)
+            .ToList();
+        if (keys.Count == 0) return;
 
-        using var dlg = new AclForm(_s3, _currentBucket, item.Key);
+        using var dlg = new AclForm(_s3, _currentBucket, keys);
         dlg.ShowDialog(this);
     }
 
