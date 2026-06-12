@@ -11,6 +11,11 @@ using AwsPartETag = Amazon.S3.Model.PartETag;
 
 namespace S3Lite.Services;
 
+public record BucketAccessSettings(
+    bool BlockPublicAccess,
+    bool AclsDisabled
+);
+
 public record CreateBucketOptions(
     bool    BlockPublicAccess,
     bool    DisableAcls,
@@ -980,6 +985,79 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
             BucketName = bucket,
             Key = key,
             AccessControlPolicy = acl
+        }).ConfigureAwait(false);
+    }
+
+    // ── Bucket public access settings ─────────────────────────────────────────
+
+    public async Task<BucketAccessSettings> GetBucketAccessSettingsAsync(string bucket)
+    {
+        bool blockPublic  = false;
+        bool aclsDisabled = false;
+
+        try
+        {
+            var resp = await ClientFor(bucket).GetPublicAccessBlockAsync(
+                new GetPublicAccessBlockRequest { BucketName = bucket }).ConfigureAwait(false);
+            var c = resp.PublicAccessBlockConfiguration;
+            blockPublic = c != null && (c.BlockPublicAcls == true || c.IgnorePublicAcls == true ||
+                                        c.BlockPublicPolicy == true || c.RestrictPublicBuckets == true);
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchPublicAccessBlockConfiguration") { }
+
+        try
+        {
+            var resp = await ClientFor(bucket).GetBucketOwnershipControlsAsync(
+                new GetBucketOwnershipControlsRequest { BucketName = bucket }).ConfigureAwait(false);
+            aclsDisabled = resp.OwnershipControls?.Rules?
+                .Any(r => r.ObjectOwnership == ObjectOwnership.BucketOwnerEnforced) == true;
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "OwnershipControlsNotFoundError") { }
+
+        return new BucketAccessSettings(blockPublic, aclsDisabled);
+    }
+
+    public async Task SetBucketAccessSettingsAsync(string bucket, BucketAccessSettings settings)
+    {
+        if (settings.BlockPublicAccess)
+        {
+            await ClientFor(bucket).PutPublicAccessBlockAsync(new PutPublicAccessBlockRequest
+            {
+                BucketName = bucket,
+                PublicAccessBlockConfiguration = new PublicAccessBlockConfiguration
+                {
+                    BlockPublicAcls       = true,
+                    IgnorePublicAcls      = true,
+                    BlockPublicPolicy     = true,
+                    RestrictPublicBuckets = true
+                }
+            }).ConfigureAwait(false);
+        }
+        else
+        {
+            await ClientFor(bucket).DeletePublicAccessBlockAsync(new DeletePublicAccessBlockRequest
+            {
+                BucketName = bucket
+            }).ConfigureAwait(false);
+        }
+
+        await ClientFor(bucket).PutBucketOwnershipControlsAsync(new PutBucketOwnershipControlsRequest
+        {
+            BucketName       = bucket,
+            OwnershipControls = new OwnershipControls
+            {
+                Rules = new List<OwnershipControlsRule>
+                {
+                    // BucketOwnerPreferred = ACLs enabled, but uploaded objects still
+                    // belong to the bucket owner (AWS-recommended way to re-enable ACLs)
+                    new()
+                    {
+                        ObjectOwnership = settings.AclsDisabled
+                            ? ObjectOwnership.BucketOwnerEnforced
+                            : ObjectOwnership.BucketOwnerPreferred
+                    }
+                }
+            }
         }).ConfigureAwait(false);
     }
 

@@ -138,7 +138,7 @@ public class AclForm : Form
         {
             Text      = "Loading ACL…",
             Left      = 10, Top = rowStart + 4 * rowH + 62,
-            Width     = 380, Height = 18,
+            Width     = 380, Height = 48,
             ForeColor = SystemColors.GrayText
         };
         Controls.Add(lblStatus);
@@ -245,13 +245,14 @@ public class AclForm : Form
             }
             catch (Exception ex)
             {
-                SetStatus($"Error saving ACL: {ex.Message}", error: true);
+                SetStatus($"Error saving ACL: {FriendlyAclError(ex)}", error: true);
             }
             finally { btnSave.Enabled = true; }
         }
         else
         {
             int done = 0, failed = 0;
+            Exception? firstError = null;
             SetStatus($"Saving 0 / {_keys.Count}…");
             await Task.WhenAll(_keys.Select(async key =>
             {
@@ -262,13 +263,17 @@ public class AclForm : Form
                     await _s3.PutAclAsync(_bucket, key, acl);
                     Interlocked.Increment(ref done);
                 }
-                catch { Interlocked.Increment(ref failed); }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref failed);
+                    Interlocked.CompareExchange(ref firstError, ex, null);
+                }
                 SetStatus($"Saving {done + failed} / {_keys.Count}…");
             }));
             if (failed == 0)
                 SetStatus($"Permissions saved for all {_keys.Count} files.", success: true);
             else
-                SetStatus($"Done: {done} saved, {failed} failed.", error: true);
+                SetStatus($"Done: {done} saved, {failed} failed. {FriendlyAclError(firstError!)}", error: true);
             btnSave.Enabled = true;
         }
     }
@@ -336,6 +341,21 @@ public class AclForm : Form
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+    private static string FriendlyAclError(Exception ex)
+    {
+        if (ex is AmazonS3Exception s3x)
+        {
+            if (s3x.ErrorCode == "AccessControlListNotSupported")
+                return "This bucket has ACLs disabled (Object Ownership: bucket owner enforced). " +
+                       "Right-click the bucket → Public Access Settings… and uncheck \"Disable ACLs\".";
+            if (s3x.ErrorCode == "AccessDenied" &&
+                s3x.Message.Contains("block public access", StringComparison.OrdinalIgnoreCase))
+                return "Public ACLs are blocked by this bucket's Block Public Access settings. " +
+                       "Right-click the bucket → Public Access Settings… and uncheck \"Block all public access\".";
+        }
+        return ex.Message;
+    }
+
     private void SetStatus(string msg, bool error = false, bool success = false)
     {
         if (InvokeRequired) { BeginInvoke(() => SetStatus(msg, error, success)); return; }
