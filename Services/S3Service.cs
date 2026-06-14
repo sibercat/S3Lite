@@ -1,4 +1,6 @@
 using Amazon;
+using Amazon.CloudFront;
+using Amazon.CloudFront.Model;
 using Amazon.Runtime;
 using Amazon.Runtime.CredentialManagement;
 using Amazon.S3;
@@ -16,6 +18,14 @@ public record BucketAccessSettings(
     bool AclsDisabled
 );
 
+/// <summary>A CloudFront distribution whose origin points at a given bucket.</summary>
+public record CfDistribution(
+    string  Id,
+    string  DomainName,   // e.g. d111111abcdef8.cloudfront.net
+    string  Comment,
+    string? OriginPath    // e.g. "/prod" or null — prepended to invalidation paths
+);
+
 public record CreateBucketOptions(
     bool    BlockPublicAccess,
     bool    DisableAcls,
@@ -29,6 +39,7 @@ public class S3Service : IDisposable
 {
     private AmazonS3Client _client;
     private readonly S3Connection _connection;
+    private readonly AWSCredentials _credentials;
 
     public S3Service(S3Connection conn)
     {
@@ -40,6 +51,7 @@ public class S3Service : IDisposable
             "AwsProfile" => ResolveProfileCredentials(conn.AwsProfileName),
             _            => new BasicAWSCredentials(conn.AccessKey, conn.SecretKey)
         };
+        _credentials = creds;
 
         var config = new AmazonS3Config
         {
@@ -1061,6 +1073,108 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         }).ConfigureAwait(false);
     }
 
+    // ── CloudFront invalidation ───────────────────────────────────────────────
+
+    private AmazonCloudFrontClient? _cfClient;
+
+    /// <summary>CloudFront only applies to real AWS S3, not custom/3rd-party endpoints.</summary>
+    public bool IsCloudFrontAvailable => string.IsNullOrWhiteSpace(_connection.EndpointUrl);
+
+    private AmazonCloudFrontClient CloudFront()
+    {
+        // CloudFront is a global service; its API endpoint lives in us-east-1.
+        return _cfClient ??= new AmazonCloudFrontClient(_credentials,
+            new AmazonCloudFrontConfig { RegionEndpoint = RegionEndpoint.USEast1 });
+    }
+
+    /// <summary>Find every CloudFront distribution that has an origin pointing at this bucket.</summary>
+    public async Task<List<CfDistribution>> FindDistributionsForBucketAsync(string bucket)
+    {
+        var matches = new List<CfDistribution>();
+        string prefix = bucket + ".s3"; // covers REST, regional, and website origin domains
+
+        var request = new ListDistributionsRequest();
+        while (true)
+        {
+            var resp  = await CloudFront().ListDistributionsAsync(request).ConfigureAwait(false);
+            var items = resp.DistributionList?.Items ?? new List<DistributionSummary>();
+            foreach (var d in items)
+            {
+                var origin = d.Origins?.Items?
+                    .FirstOrDefault(o => o.DomainName?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true);
+                if (origin != null)
+                {
+                    string? originPath = string.IsNullOrEmpty(origin.OriginPath) ? null : origin.OriginPath;
+                    matches.Add(new CfDistribution(d.Id, d.DomainName, d.Comment ?? "", originPath));
+                }
+            }
+
+            if (resp.DistributionList?.IsTruncated == true)
+                request.Marker = resp.DistributionList.NextMarker;
+            else
+                break;
+        }
+        return matches;
+    }
+
+    /// <summary>Validate a manually-entered distribution ID and return its details.</summary>
+    public async Task<CfDistribution> GetDistributionAsync(string distributionId)
+    {
+        var resp = await CloudFront().GetDistributionAsync(
+            new GetDistributionRequest { Id = distributionId }).ConfigureAwait(false);
+        var d = resp.Distribution;
+        var origin = d.DistributionConfig?.Origins?.Items?.FirstOrDefault();
+        string? originPath = string.IsNullOrEmpty(origin?.OriginPath) ? null : origin!.OriginPath;
+        return new CfDistribution(d.Id, d.DomainName,
+            d.DistributionConfig?.Comment ?? "", originPath);
+    }
+
+    /// <summary>
+    /// Convert object keys to CloudFront invalidation paths. Each key becomes "/key";
+    /// an index.html key additionally invalidates the directory URL that S3 website
+    /// hosting serves it at — "features/repo/index.html" → "/features/repo/index.html"
+    /// and "/features/repo/", and "index.html" → "/index.html" and "/".
+    /// A bare "/*" wildcard is passed through unchanged.
+    /// </summary>
+    public static List<string> KeysToInvalidationPaths(IEnumerable<string> keys)
+    {
+        var paths = new List<string>();
+        foreach (var key in keys)
+        {
+            string p = "/" + key.TrimStart('/');
+            paths.Add(p);
+            if (p == "/*") continue;
+            if (p.Equals("/index.html", StringComparison.OrdinalIgnoreCase))
+                paths.Add("/");
+            else if (p.EndsWith("/index.html", StringComparison.OrdinalIgnoreCase))
+                paths.Add(p[..^"index.html".Length]); // strip filename, keep trailing slash
+        }
+        return paths.Distinct().ToList();
+    }
+
+    /// <summary>Create an invalidation for the given keys. Returns the invalidation ID.</summary>
+    public async Task<string> CreateInvalidationAsync(
+        string distributionId, IEnumerable<string> paths, string? originPath = null)
+    {
+        // Each path must be absolute from the distribution root; account for an origin path.
+        var items = KeysToInvalidationPaths(paths)
+            .Select(p => string.IsNullOrEmpty(originPath) ? p : originPath.TrimEnd('/') + p)
+            .Distinct()
+            .ToList();
+
+        var resp = await CloudFront().CreateInvalidationAsync(new CreateInvalidationRequest
+        {
+            DistributionId    = distributionId,
+            InvalidationBatch = new InvalidationBatch
+            {
+                CallerReference = $"s3lite-{DateTime.UtcNow:yyyyMMddHHmmssfff}",
+                Paths = new Paths { Quantity = items.Count, Items = items }
+            }
+        }).ConfigureAwait(false);
+
+        return resp.Invalidation.Id;
+    }
+
     // ── URL generation ────────────────────────────────────────────────────────
 
     public string GetPublicUrl(string bucket, string key, bool https = true)
@@ -1217,5 +1331,6 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
     {
         _client.Dispose();
         foreach (var c in _extraClients.Values) c.Dispose();
+        _cfClient?.Dispose();
     }
 }

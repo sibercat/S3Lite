@@ -17,6 +17,9 @@ public class AppSettings
     /// <summary>Externally-added buckets: bucket name → AWS region.</summary>
     public Dictionary<string, string> ExternalBuckets { get; set; } = new();
 
+    /// <summary>Remembered CloudFront distribution per bucket: bucket name → distribution ID.</summary>
+    public Dictionary<string, string> CloudFrontDistributions { get; set; } = new();
+
     /// <summary>Profile name to auto-connect on startup. Null = don't auto-connect.</summary>
     public string? LastProfile { get; set; }
 }

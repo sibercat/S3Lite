@@ -366,6 +366,9 @@ public class MainForm : Form
         var ctxAcl = new ToolStripMenuItem("Edit Permissions (ACL)…");
         ctxAcl.Click += CtxAcl_Click;
         ctx.Items.Add(ctxAcl);
+        var ctxInvalidate = new ToolStripMenuItem("Invalidate CloudFront Cache…");
+        ctxInvalidate.Click += (_, _) => BeginInvoke(DoInvalidateCloudFront);
+        ctx.Items.Add(ctxInvalidate);
         var ctxRestore = new ToolStripMenuItem("Restore from Glacier…");
         ctxRestore.Click += (_, _) => BeginInvoke(DoRestoreFromGlacier);
         ctx.Items.Add(ctxRestore);
@@ -407,6 +410,8 @@ public class MainForm : Form
             ctxPreview.Enabled    = singleFile;
             ctxRename.Enabled     = singleFile || singleFolder;
             ctxAcl.Enabled        = anyFile;
+            ctxInvalidate.Visible = _s3?.IsCloudFrontAvailable == true;
+            ctxInvalidate.Enabled = anyFile;
             ctxRestore.Visible    = isGlacier;
             ctxRestore.Enabled    = isGlacier;
             ctxFileClass.Enabled  = anyFile;
@@ -1696,6 +1701,20 @@ public class MainForm : Form
         if (keys.Count == 0) return;
 
         using var dlg = new AclForm(_s3, _currentBucket, keys);
+        dlg.ShowDialog(this);
+    }
+
+    private void DoInvalidateCloudFront()
+    {
+        if (_s3 == null || string.IsNullOrEmpty(_currentBucket)) return;
+        var keys = lvFiles.SelectedItems.Cast<ListViewItem>()
+            .Select(lvi => lvi.Tag as S3Item)
+            .Where(item => item?.Type == S3ItemType.File)
+            .Select(item => item!.Key)
+            .ToList();
+        if (keys.Count == 0) return;
+
+        using var dlg = new InvalidateForm(_s3, _currentBucket, keys, _settings);
         dlg.ShowDialog(this);
     }
 
