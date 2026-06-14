@@ -1152,12 +1152,18 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         return paths.Distinct().ToList();
     }
 
-    /// <summary>Create an invalidation for the given keys. Returns the invalidation ID.</summary>
+    /// <summary>
+    /// Create an invalidation for the given literal paths (as shown/edited in the dialog).
+    /// Each path is normalized to start with "/"; an origin path is prepended if present.
+    /// </summary>
     public async Task<string> CreateInvalidationAsync(
         string distributionId, IEnumerable<string> paths, string? originPath = null)
     {
         // Each path must be absolute from the distribution root; account for an origin path.
-        var items = KeysToInvalidationPaths(paths)
+        var items = paths
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .Select(p => "/" + p.TrimStart('/'))
             .Select(p => string.IsNullOrEmpty(originPath) ? p : originPath.TrimEnd('/') + p)
             .Distinct()
             .ToList();

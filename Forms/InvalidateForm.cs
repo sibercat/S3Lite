@@ -12,6 +12,7 @@ public class InvalidateForm : Form
 
     private List<CfDistribution> _matches = new();
 
+    private TextBox  txtPaths    = null!;
     private ComboBox cmbDist     = null!;
     private TextBox  txtManual   = null!;
     private Button   btnVerify   = null!;
@@ -42,19 +43,21 @@ public class InvalidateForm : Form
         var previewPaths = S3Service.KeysToInvalidationPaths(_keys);
         Controls.Add(new Label
         {
-            Text  = $"Paths to invalidate ({_keys.Count} file{(_keys.Count == 1 ? "" : "s")} → " +
-                    $"{previewPaths.Count} path{(previewPaths.Count == 1 ? "" : "s")}):",
-            Left  = 14, Top = 12, Width = 500, Height = 18
+            Text  = "Paths to invalidate (one per line — edit, add, or remove as needed):",
+            Left  = 14, Top = 12, Width = 510, Height = 18
         });
 
-        var lstPaths = new ListBox
+        txtPaths = new TextBox
         {
             Left = 14, Top = 32, Width = 510, Height = 90,
-            SelectionMode = SelectionMode.None,
-            IntegralHeight = false
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            WordWrap = false,
+            AcceptsReturn = true,
+            Font = new Font(FontFamily.GenericMonospace, 9f),
+            Text = string.Join(Environment.NewLine, previewPaths)
         };
-        foreach (var p in previewPaths) lstPaths.Items.Add(p);
-        Controls.Add(lstPaths);
+        Controls.Add(txtPaths);
 
         // ── Distribution selection ────────────────────────────────────────────
         Controls.Add(new Label
@@ -96,8 +99,14 @@ public class InvalidateForm : Form
 
         chkWildcard = new CheckBox
         {
-            Text  = "Invalidate the entire distribution (/*) instead of the selected files",
+            Text  = "Invalidate the entire distribution (/*) instead of the paths above",
             Left  = 14, Top = 204, Width = 510, Height = 20
+        };
+        chkWildcard.CheckedChanged += (_, _) =>
+        {
+            txtPaths.Enabled = !chkWildcard.Checked;
+            txtPaths.BackColor = chkWildcard.Checked
+                ? SystemColors.Control : SystemColors.Window;
         };
         Controls.Add(chkWildcard);
 
@@ -252,9 +261,23 @@ public class InvalidateForm : Form
         var dist = CurrentDistribution();
         if (dist == null) { SetStatus("Select or verify a distribution first.", error: true); return; }
 
-        var paths = chkWildcard.Checked
-            ? new List<string> { "/*" }
-            : _keys.ToList();
+        List<string> paths;
+        if (chkWildcard.Checked)
+        {
+            paths = new List<string> { "/*" };
+        }
+        else
+        {
+            paths = txtPaths.Lines
+                .Select(l => l.Trim())
+                .Where(l => l.Length > 0)
+                .ToList();
+            if (paths.Count == 0)
+            {
+                SetStatus("Enter at least one path, or use the /* option.", error: true);
+                return;
+            }
+        }
 
         btnInvalidate.Enabled = false;
         SetStatus("Submitting invalidation…");
