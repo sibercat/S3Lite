@@ -10,9 +10,9 @@
     <SelfContained>false</SelfContained>
 
     <!-- Version info shown in File Properties → Details -->
-    <Version>1.6.1</Version>
-    <AssemblyVersion>1.6.1.0</AssemblyVersion>
-    <FileVersion>1.6.1.0</FileVersion>
+    <Version>1.7.0</Version>
+    <AssemblyVersion>1.7.0.0</AssemblyVersion>
+    <FileVersion>1.7.0.0</FileVersion>
     <Product>S3 Lite</Product>
     <Description>Lightweight S3 Browser</Description>
     <Copyright>Copyright © 2026</Copyright>
@@ -22,6 +22,7 @@
   <ItemGroup>
     <PackageReference Include="AWSSDK.CloudFront" Version="4.0.17.4" />
     <PackageReference Include="AWSSDK.S3" Version="4.0.21" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.9" />
   </ItemGroup>
 
   <ItemGroup>

@@ -40,23 +40,7 @@ public class TransferJob
 
     public event Action? Changed;
 
-    private int _lastProgress = -1;
-    private TransferStatus _lastStatus = (TransferStatus)(-1);
-
-    public void NotifyChanged()
-    {
-        int p = Progress;
-        if (p != _lastProgress || Status != _lastStatus)
-        {
-            _lastProgress = p;
-            _lastStatus = Status;
-            Changed?.Invoke();
-        }
-        else
-        {
-            Changed?.Invoke();
-        }
-    }
+    public void NotifyChanged() => Changed?.Invoke();
 
     public void ResetCts()
     {

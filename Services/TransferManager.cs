@@ -82,8 +82,13 @@ public class TransferManager : IDisposable
         }
         catch (Exception ex)
         {
-            job.Status = TransferStatus.Failed;
-            job.ErrorMessage = ex.Message;
+            // A cancelled job's abort can make in-flight parts throw NoSuchUpload —
+            // keep the Cancelled status rather than reporting a failure
+            if (job.Status != TransferStatus.Cancelled)
+            {
+                job.Status = TransferStatus.Failed;
+                job.ErrorMessage = ex.Message;
+            }
             job.NotifyChanged();
         }
         finally
@@ -111,15 +116,17 @@ public class TransferManager : IDisposable
 
     public void Cancel(TransferJob job)
     {
-        bool wasRunning = job.Status == TransferStatus.Running;
         job.Status = TransferStatus.Cancelled;
         job.Cts.Cancel();
         job.NotifyChanged();
 
-        if (wasRunning && job.Direction == TransferDirection.Upload && job.UploadId != null)
+        // Abort any in-progress multipart upload regardless of prior state
+        // (running, paused, or failed) — orphaned parts accrue storage costs
+        if (job.Direction == TransferDirection.Upload && job.UploadId != null)
         {
             var uploadId = job.UploadId;
             job.UploadId = null;
+            job.CompletedParts.Clear();
             _ = _s3.AbortMultipartUploadAsync(job.Bucket, job.Key, uploadId);
         }
     }

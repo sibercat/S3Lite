@@ -97,13 +97,14 @@ public class S3Service : IDisposable
     public void RegisterExternalBucket(string bucket, string region)
     {
         if (_extraClients.ContainsKey(bucket)) return;
-        var creds  = new BasicAWSCredentials(_connection.AccessKey, _connection.SecretKey);
         var config = new AmazonS3Config
         {
             ForcePathStyle = _connection.ForcePathStyle,
             RegionEndpoint = RegionEndpoint.GetBySystemName(region)
         };
-        _extraClients[bucket] = new AmazonS3Client(creds, config);
+        // Use the resolved credentials — AccessKey/SecretKey on the connection are
+        // empty when the user connected via env vars or an AWS profile
+        _extraClients[bucket] = new AmazonS3Client(_credentials, config);
     }
 
     public async Task<List<string>> ListBucketsAsync()
@@ -265,13 +266,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
             string relKey  = srcPrefix.Length > 0 ? srcKey[srcPrefix.Length..] : srcKey;
             string dstKey  = dstPrefix + relKey;
 
-            await ClientFor(srcBucket).CopyObjectAsync(new CopyObjectRequest
-            {
-                SourceBucket      = srcBucket,
-                SourceKey         = srcKey,
-                DestinationBucket = dstBucket,
-                DestinationKey    = dstKey
-            }, ct).ConfigureAwait(false);
+            await CopyObjectSmartAsync(srcBucket, srcKey, dstBucket, dstKey, ct: ct).ConfigureAwait(false);
 
             if (deleteSource)
                 await ClientFor(srcBucket).DeleteObjectAsync(srcBucket, srcKey).ConfigureAwait(false);
@@ -282,15 +277,28 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
 
     public async Task DeleteBucketAsync(string bucket)
     {
-        // Empty the bucket first (delete all object versions)
-        var listReq = new ListObjectsV2Request { BucketName = bucket };
-        ListObjectsV2Response listResp;
+        // Empty the bucket first. ListVersions covers both plain and versioned
+        // buckets (versions + delete markers) — ListObjectsV2 alone would only
+        // add delete markers on a versioned bucket and DeleteBucket would fail.
+        var listReq = new ListVersionsRequest { BucketName = bucket };
+        ListVersionsResponse listResp;
         do
         {
-            listResp = await ClientFor(bucket).ListObjectsV2Async(listReq).ConfigureAwait(false);
-            foreach (var obj in listResp.S3Objects ?? [])
-                await ClientFor(bucket).DeleteObjectAsync(bucket, obj.Key).ConfigureAwait(false);
-            listReq.ContinuationToken = listResp.NextContinuationToken;
+            listResp = await ClientFor(bucket).ListVersionsAsync(listReq).ConfigureAwait(false);
+            var batch = (listResp.Versions ?? [])
+                .Select(v => new KeyVersion { Key = v.Key, VersionId = v.VersionId })
+                .ToList();
+            if (batch.Count > 0)
+            {
+                await ClientFor(bucket).DeleteObjectsAsync(new DeleteObjectsRequest
+                {
+                    BucketName = bucket,
+                    Objects    = batch,
+                    Quiet      = true
+                }).ConfigureAwait(false);
+            }
+            listReq.KeyMarker       = listResp.NextKeyMarker;
+            listReq.VersionIdMarker = listResp.NextVersionIdMarker;
         } while (listResp.IsTruncated == true);
 
         await ClientFor(bucket).DeleteBucketAsync(new DeleteBucketRequest { BucketName = bucket })
@@ -304,14 +312,90 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
 
     public async Task RenameObjectAsync(string bucket, string oldKey, string newKey)
     {
-        await ClientFor(bucket).CopyObjectAsync(new CopyObjectRequest
-        {
-            SourceBucket      = bucket,
-            SourceKey         = oldKey,
-            DestinationBucket = bucket,
-            DestinationKey    = newKey
-        }).ConfigureAwait(false);
+        await CopyObjectSmartAsync(bucket, oldKey, bucket, newKey).ConfigureAwait(false);
         await ClientFor(bucket).DeleteObjectAsync(bucket, oldKey).ConfigureAwait(false);
+    }
+
+    private const long MaxSingleCopyBytes = 5L * 1024 * 1024 * 1024;   // CopyObject API limit
+    private const long CopyPartSize       = 512L * 1024 * 1024;        // parts for multipart copy
+
+    /// <summary>
+    /// Server-side copy that transparently switches to multipart copy for objects
+    /// larger than the 5 GB CopyObject limit. Metadata is preserved in both paths.
+    /// </summary>
+    private async Task CopyObjectSmartAsync(
+        string srcBucket, string srcKey, string dstBucket, string dstKey,
+        S3StorageClass? storageClass = null, CancellationToken ct = default)
+    {
+        var meta = await ClientFor(srcBucket).GetObjectMetadataAsync(
+            new GetObjectMetadataRequest { BucketName = srcBucket, Key = srcKey }, ct).ConfigureAwait(false);
+        long size = meta.ContentLength;
+
+        if (size <= MaxSingleCopyBytes)
+        {
+            var req = new CopyObjectRequest
+            {
+                SourceBucket      = srcBucket,
+                SourceKey         = srcKey,
+                DestinationBucket = dstBucket,
+                DestinationKey    = dstKey,
+                MetadataDirective = S3MetadataDirective.COPY
+            };
+            if (storageClass != null) req.StorageClass = storageClass;
+            await ClientFor(srcBucket).CopyObjectAsync(req, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // Multipart copy — metadata must be carried onto the initiate request
+        var init = new InitiateMultipartUploadRequest
+        {
+            BucketName  = dstBucket,
+            Key         = dstKey,
+            ContentType = meta.Headers.ContentType
+        };
+        if (!string.IsNullOrEmpty(meta.Headers.ContentEncoding))
+            init.Headers.ContentEncoding = meta.Headers.ContentEncoding;
+        foreach (var k in meta.Metadata.Keys)
+            init.Metadata[k] = meta.Metadata[k];
+        if (storageClass != null) init.StorageClass = storageClass;
+
+        var initResp = await ClientFor(srcBucket).InitiateMultipartUploadAsync(init, ct).ConfigureAwait(false);
+        try
+        {
+            int totalParts = (int)Math.Ceiling((double)size / CopyPartSize);
+            var etags = new List<AwsPartETag>();
+            for (int p = 1; p <= totalParts; p++)
+            {
+                ct.ThrowIfCancellationRequested();
+                long first = (long)(p - 1) * CopyPartSize;
+                long last  = Math.Min(first + CopyPartSize, size) - 1;
+                var partResp = await ClientFor(srcBucket).CopyPartAsync(new CopyPartRequest
+                {
+                    SourceBucket      = srcBucket,
+                    SourceKey         = srcKey,
+                    DestinationBucket = dstBucket,
+                    DestinationKey    = dstKey,
+                    UploadId          = initResp.UploadId,
+                    PartNumber        = p,
+                    FirstByte         = first,
+                    LastByte          = last
+                }, ct).ConfigureAwait(false);
+                etags.Add(new AwsPartETag { PartNumber = p, ETag = partResp.ETag });
+            }
+
+            await ClientFor(srcBucket).CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+            {
+                BucketName = dstBucket,
+                Key        = dstKey,
+                UploadId   = initResp.UploadId,
+                PartETags  = etags
+            }, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            await AbortMultipartUploadAsync(dstBucket, dstKey, initResp.UploadId).ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>Wraps a response stream in the appropriate decompression stream if Content-Encoding requires it.</summary>
@@ -354,15 +438,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
     public async Task ChangeObjectStorageClassAsync(string bucket, string key, string storageClass)
     {
         var sc = S3StorageClass.FindValue(storageClass);
-        await ClientFor(bucket).CopyObjectAsync(new CopyObjectRequest
-        {
-            SourceBucket      = bucket,
-            SourceKey         = key,
-            DestinationBucket = bucket,
-            DestinationKey    = key,
-            StorageClass      = sc,
-            MetadataDirective = S3MetadataDirective.COPY
-        }).ConfigureAwait(false);
+        await CopyObjectSmartAsync(bucket, key, bucket, key, sc).ConfigureAwait(false);
     }
 
     /// <summary>Changes the storage class of every object in the bucket via server-side copy-to-self.</summary>
@@ -386,15 +462,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         for (int i = 0; i < keys.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
-            await ClientFor(bucket).CopyObjectAsync(new CopyObjectRequest
-            {
-                SourceBucket      = bucket,
-                SourceKey         = keys[i],
-                DestinationBucket = bucket,
-                DestinationKey    = keys[i],
-                StorageClass      = sc,
-                MetadataDirective = S3MetadataDirective.COPY
-            }, ct).ConfigureAwait(false);
+            await CopyObjectSmartAsync(bucket, keys[i], bucket, keys[i], sc, ct).ConfigureAwait(false);
             progress?.Report((i + 1, keys.Count));
         }
     }
@@ -406,7 +474,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         do
         {
             resp = await ClientFor(bucket).ListObjectsV2Async(request);
-            foreach (var obj in resp.S3Objects)
+            foreach (var obj in resp.S3Objects ?? [])
                 await ClientFor(bucket).DeleteObjectAsync(bucket, obj.Key);
             request.ContinuationToken = resp.NextContinuationToken;
         } while (resp.IsTruncated == true);
@@ -735,14 +803,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
         {
             ct.ThrowIfCancellationRequested();
             string destKey = newPrefix + key[oldPrefix.Length..];
-            await ClientFor(bucket).CopyObjectAsync(new CopyObjectRequest
-            {
-                SourceBucket      = bucket,
-                SourceKey         = key,
-                DestinationBucket = bucket,
-                DestinationKey    = destKey,
-                MetadataDirective = S3MetadataDirective.COPY
-            }, ct).ConfigureAwait(false);
+            await CopyObjectSmartAsync(bucket, key, bucket, destKey, ct: ct).ConfigureAwait(false);
             await ClientFor(bucket).DeleteObjectAsync(bucket, key, ct).ConfigureAwait(false);
         }
     }

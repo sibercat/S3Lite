@@ -785,8 +785,10 @@ public class MainForm : Form
         using var dlg = new ConnectForm(_connection);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-        _s3?.Dispose();
-        _transferManager?.Dispose();
+        // Null out after disposing — if the new connection fails to construct we
+        // must not keep using (or appear to be using) a disposed client
+        _s3?.Dispose();             _s3 = null;
+        _transferManager?.Dispose(); _transferManager = null;
         _connection = dlg.Result;
         try
         {
@@ -814,6 +816,13 @@ public class MainForm : Form
         }
         catch (Exception ex)
         {
+            _s3?.Dispose();             _s3 = null;
+            _transferManager?.Dispose(); _transferManager = null;
+            lstBuckets.Items.Clear();
+            lvFiles.Items.Clear();
+            _currentBucket = ""; _currentPrefix = "";
+            UpdatePathLabel();
+            SetConnected(false);
             SetStatus($"Connection failed: {ex.Message}");
             MessageBox.Show(ex.Message, "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -874,6 +883,23 @@ public class MainForm : Form
 
     private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        var active = _transferManager?.Jobs
+            .Where(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused)
+            .ToList();
+        if (active?.Count > 0)
+        {
+            var confirm = MessageBox.Show(
+                $"{active.Count} transfer(s) are still in progress.\n\nQuit anyway? Unfinished uploads will be cancelled.",
+                "Transfers In Progress",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2);
+            if (confirm != DialogResult.Yes) { e.Cancel = true; return; }
+
+            // Cancel so any in-progress multipart uploads are aborted (no orphaned parts)
+            foreach (var job in active) _transferManager!.Cancel(job);
+        }
+
         if (_mouseNavFilter != null) Application.RemoveMessageFilter(_mouseNavFilter);
         _trayIcon?.Dispose();
         _transferManager?.Dispose();
@@ -1255,28 +1281,36 @@ public class MainForm : Form
         var destFolder  = FolderPicker.Pick(Handle, defaultPath);
         if (string.IsNullOrWhiteSpace(destFolder)) return;
 
-        foreach (var item in selected)
+        try
         {
-            if (item.Type == S3ItemType.File)
+            foreach (var item in selected)
             {
-                var localPath = Path.Combine(destFolder, item.Name);
-                _transferManager.Enqueue(TransferDirection.Download, _currentBucket, item.Key, localPath);
-            }
-            else if (item.Type == S3ItemType.Folder)
-            {
-                // Recursively list all files under the folder prefix (no delimiter = all levels)
-                SetStatus($"Enqueuing folder {item.Name}…");
-                var children = await _s3.ListAllObjectsAsync(_currentBucket, item.Key);
-                foreach (var child in children)
+                if (item.Type == S3ItemType.File)
                 {
-                    // Strip the folder's own prefix to get the relative path inside it
-                    var relative  = child.Key.Substring(item.Key.Length).Replace('/', Path.DirectorySeparatorChar);
-                    var localPath = Path.Combine(destFolder, item.Name.TrimEnd('/'), relative);
-                    Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                    _transferManager.Enqueue(TransferDirection.Download, _currentBucket, child.Key, localPath);
+                    var localPath = Path.Combine(destFolder, item.Name);
+                    _transferManager.Enqueue(TransferDirection.Download, _currentBucket, item.Key, localPath);
                 }
-                SetStatus($"Queued {children.Count} file(s) from {item.Name}");
+                else if (item.Type == S3ItemType.Folder)
+                {
+                    // Recursively list all files under the folder prefix (no delimiter = all levels)
+                    SetStatus($"Enqueuing folder {item.Name}…");
+                    var children = await _s3.ListAllObjectsAsync(_currentBucket, item.Key);
+                    foreach (var child in children)
+                    {
+                        // Strip the folder's own prefix to get the relative path inside it
+                        var relative  = child.Key.Substring(item.Key.Length).Replace('/', Path.DirectorySeparatorChar);
+                        var localPath = Path.Combine(destFolder, item.Name.TrimEnd('/'), relative);
+                        Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                        _transferManager.Enqueue(TransferDirection.Download, _currentBucket, child.Key, localPath);
+                    }
+                    SetStatus($"Queued {children.Count} file(s) from {item.Name}");
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Error: {ex.Message}");
+            MessageBox.Show(ex.Message, "Download Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -1404,8 +1438,16 @@ public class MainForm : Form
         if (_s3 == null || string.IsNullOrEmpty(_currentBucket)) return;
         var name = InputPrompt("Folder name:", "New Folder");
         if (string.IsNullOrWhiteSpace(name)) return;
-        await _s3.CreateFolderAsync(_currentBucket, _currentPrefix + name.Trim());
-        await LoadFilesAsync();
+        try
+        {
+            await _s3.CreateFolderAsync(_currentBucket, _currentPrefix + name.Trim());
+            await LoadFilesAsync();
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Error: {ex.Message}");
+            MessageBox.Show(ex.Message, "New Folder Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     // ── New Bucket ────────────────────────────────────────────────────────────
@@ -1849,24 +1891,33 @@ public class MainForm : Form
     private TransferJob? SelectedJob =>
         lvTransfers.SelectedItems.Count > 0 ? lvTransfers.SelectedItems[0].Tag as TransferJob : null;
 
+    // Acts on the selected transfer if one is selected; otherwise on all eligible jobs
+    private IEnumerable<TransferJob> ActionTargets(Func<TransferJob, bool> eligible)
+    {
+        if (_transferManager == null) return [];
+        var sel = SelectedJob;
+        if (sel != null) return eligible(sel) ? [sel] : [];
+        return _transferManager.Jobs.Where(eligible).ToList();
+    }
+
     private void PauseSelected()
     {
         if (_transferManager == null) return;
-        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Running or TransferStatus.Pending).ToList())
+        foreach (var job in ActionTargets(j => j.Status is TransferStatus.Running or TransferStatus.Pending))
             _transferManager.Pause(job);
     }
 
     private void ResumeSelected()
     {
         if (_transferManager == null) return;
-        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Paused or TransferStatus.Failed).ToList())
+        foreach (var job in ActionTargets(j => j.Status is TransferStatus.Paused or TransferStatus.Failed))
             _transferManager.Resume(job);
     }
 
     private void CancelSelected()
     {
         if (_transferManager == null) return;
-        foreach (var job in _transferManager.Jobs.Where(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused).ToList())
+        foreach (var job in ActionTargets(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused))
             _transferManager.Cancel(job);
     }
 
@@ -1881,6 +1932,8 @@ public class MainForm : Form
             {
                 lvTransfers.Items.Remove(lvi);
                 _jobItems.Remove(id);
+                lock (_lastUiUpdate) _lastUiUpdate.Remove(id);
+                _speedSamples.Remove(id);
             }
         }
         UpdateFilterTabs();
@@ -1889,7 +1942,11 @@ public class MainForm : Form
 
     private void UpdateTransferButtons()
     {
-        var jobs = _transferManager?.Jobs ?? (IReadOnlyList<TransferJob>)Array.Empty<TransferJob>();
+        // With a selection, buttons reflect that job; otherwise any eligible job
+        var sel = SelectedJob;
+        var jobs = sel != null
+            ? (IReadOnlyList<TransferJob>)[sel]
+            : _transferManager?.Jobs ?? (IReadOnlyList<TransferJob>)Array.Empty<TransferJob>();
         btnPauseJob.Enabled  = jobs.Any(j => j.Status is TransferStatus.Running or TransferStatus.Pending);
         btnResumeJob.Enabled = jobs.Any(j => j.Status is TransferStatus.Paused or TransferStatus.Failed);
         btnCancelJob.Enabled = jobs.Any(j => j.Status is TransferStatus.Running or TransferStatus.Pending or TransferStatus.Paused);
@@ -2024,7 +2081,7 @@ public class MainForm : Form
 
     private static string InputPrompt(string prompt, string title, string defaultValue = "")
     {
-        var form  = new Form { Text = title, Size = new Size(440, 120), FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
+        using var form = new Form { Text = title, Size = new Size(440, 120), FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent, MaximizeBox = false, MinimizeBox = false };
         var lbl   = new Label { Text = prompt, Left = 10, Top = 10, Width = 400 };
         var txt   = new TextBox { Left = 10, Top = 30, Width = 400, Text = defaultValue };
         var btnOk = new Button { Text = "OK",     Left = 250, Top = 55, Width = 75, DialogResult = DialogResult.OK };
