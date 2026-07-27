@@ -18,6 +18,13 @@ public record BucketAccessSettings(
     bool AclsDisabled
 );
 
+/// <summary>S3 static website hosting configuration for a bucket.</summary>
+public record WebsiteConfig(
+    bool   Enabled,
+    string IndexDocument,
+    string ErrorDocument
+);
+
 /// <summary>A CloudFront distribution whose origin points at a given bucket.</summary>
 public record CfDistribution(
     string  Id,
@@ -985,6 +992,18 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
             catch { }
         });
 
+        var websiteTask = Task.Run(async () =>
+        {
+            try
+            {
+                var cfg = await GetWebsiteConfigAsync(bucket).ConfigureAwait(false);
+                props.StaticWebsite = cfg.Enabled
+                    ? $"Enabled (index: {cfg.IndexDocument})"
+                    : "Disabled";
+            }
+            catch { props.StaticWebsite = "Disabled"; }
+        });
+
         // ── List all objects for stats (runs in parallel with config calls) ───
         var statsTask = Task.Run(async () =>
         {
@@ -1038,7 +1057,7 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
 
         await Task.WhenAll(ownerTask, regionTask, versioningTask, loggingTask,
             objectLockTask, accelerationTask, encryptionTask, requesterTask,
-            replicationTask, multipartTask, statsTask).ConfigureAwait(false);
+            replicationTask, multipartTask, websiteTask, statsTask).ConfigureAwait(false);
 
         return props;
     }
@@ -1132,6 +1151,123 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
                 }
             }
         }).ConfigureAwait(false);
+    }
+
+    // ── Static website hosting ────────────────────────────────────────────────
+
+    // Regions created before ~2017 use "s3-website-<region>"; newer ones use
+    // "s3-website.<region>". Getting this wrong yields a non-resolving hostname.
+    private static readonly HashSet<string> DashWebsiteRegions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "us-east-1", "us-west-1", "us-west-2", "ap-southeast-1", "ap-southeast-2",
+        "ap-northeast-1", "eu-west-1", "sa-east-1", "us-gov-west-1"
+    };
+
+    public async Task<WebsiteConfig> GetWebsiteConfigAsync(string bucket)
+    {
+        try
+        {
+            var resp = await ClientFor(bucket).GetBucketWebsiteAsync(
+                new GetBucketWebsiteRequest { BucketName = bucket }).ConfigureAwait(false);
+            var cfg = resp.WebsiteConfiguration;
+            return new WebsiteConfig(
+                true,
+                cfg?.IndexDocumentSuffix          ?? "index.html",
+                cfg?.ErrorDocument                ?? "");
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchWebsiteConfiguration")
+        {
+            return new WebsiteConfig(false, "index.html", "error.html");
+        }
+    }
+
+    public async Task EnableWebsiteAsync(string bucket, string indexDocument, string errorDocument)
+    {
+        var cfg = new WebsiteConfiguration { IndexDocumentSuffix = indexDocument };
+        if (!string.IsNullOrWhiteSpace(errorDocument))
+            cfg.ErrorDocument = errorDocument;
+
+        await ClientFor(bucket).PutBucketWebsiteAsync(new PutBucketWebsiteRequest
+        {
+            BucketName           = bucket,
+            WebsiteConfiguration = cfg
+        }).ConfigureAwait(false);
+    }
+
+    public async Task DisableWebsiteAsync(string bucket)
+    {
+        await ClientFor(bucket).DeleteBucketWebsiteAsync(
+            new DeleteBucketWebsiteRequest { BucketName = bucket }).ConfigureAwait(false);
+    }
+
+    /// <summary>The public website endpoint for a bucket, e.g. http://mysite.s3-website-us-east-1.amazonaws.com</summary>
+    public string GetWebsiteEndpoint(string bucket, string region)
+    {
+        if (string.IsNullOrWhiteSpace(region)) region = "us-east-1";
+        string sep = DashWebsiteRegions.Contains(region) ? "-" : ".";
+        return $"http://{bucket}.s3-website{sep}{region}.amazonaws.com";
+    }
+
+    // ── Public-read bucket policy ─────────────────────────────────────────────
+
+    private const string PublicReadSid = "S3LitePublicReadGetObject";
+
+    private static string PublicReadPolicy(string bucket) => $$"""
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "{{PublicReadSid}}",
+          "Effect": "Allow",
+          "Principal": "*",
+          "Action": "s3:GetObject",
+          "Resource": "arn:aws:s3:::{{bucket}}/*"
+        }
+      ]
+    }
+    """;
+
+    /// <summary>Returns the bucket's policy JSON, or null when no policy is set.</summary>
+    public async Task<string?> GetBucketPolicyAsync(string bucket)
+    {
+        try
+        {
+            var resp = await ClientFor(bucket).GetBucketPolicyAsync(
+                new GetBucketPolicyRequest { BucketName = bucket }).ConfigureAwait(false);
+            return string.IsNullOrWhiteSpace(resp.Policy) ? null : resp.Policy;
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode is "NoSuchBucketPolicy" or "NoSuchBucketPolicyError")
+        {
+            return null;
+        }
+    }
+
+    /// <summary>True when a policy granting anonymous s3:GetObject on this bucket exists.</summary>
+    public async Task<bool> HasPublicReadPolicyAsync(string bucket)
+    {
+        var policy = await GetBucketPolicyAsync(bucket).ConfigureAwait(false);
+        if (policy == null) return false;
+        // Good-enough check: an Allow of s3:GetObject to everyone
+        return policy.Contains("s3:GetObject", StringComparison.OrdinalIgnoreCase) &&
+               policy.Contains("\"Allow\"", StringComparison.OrdinalIgnoreCase) &&
+               (policy.Contains("\"Principal\": \"*\"") || policy.Contains("\"Principal\":\"*\"") ||
+                policy.Contains("\"AWS\": \"*\"")       || policy.Contains("\"AWS\":\"*\""));
+    }
+
+    /// <summary>Replaces the bucket policy with one granting anonymous read of all objects.</summary>
+    public async Task ApplyPublicReadPolicyAsync(string bucket)
+    {
+        await ClientFor(bucket).PutBucketPolicyAsync(new PutBucketPolicyRequest
+        {
+            BucketName = bucket,
+            Policy     = PublicReadPolicy(bucket)
+        }).ConfigureAwait(false);
+    }
+
+    public async Task DeleteBucketPolicyAsync(string bucket)
+    {
+        await ClientFor(bucket).DeleteBucketPolicyAsync(
+            new DeleteBucketPolicyRequest { BucketName = bucket }).ConfigureAwait(false);
     }
 
     // ── CloudFront invalidation ───────────────────────────────────────────────

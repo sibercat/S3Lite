@@ -168,6 +168,7 @@ public class BucketPropertiesForm : Form
         AddStatus("Transfer Acceleration",    p.TransferAcceleration);
         AddStatus("Server-side encryption",   p.Encryption);
         AddStatus("Requester pays",      p.RequesterPays);
+        AddStatus("Static website",      p.StaticWebsite);
 
         // ── File details ──────────────────────────────────────────────────────
         if (p.FileTypes.Count > 0 || p.StorageClasses.Count > 0 || p.ModifiedFrom.HasValue)

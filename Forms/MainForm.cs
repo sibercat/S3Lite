@@ -238,6 +238,7 @@ public class MainForm : Form
         var ctxRemoveExt  = new ToolStripMenuItem("Remove from Buckets List");
         var ctxAddExt     = new ToolStripMenuItem("Add External Bucket…");
         var ctxBktAccess  = new ToolStripMenuItem("Public Access Settings…");
+        var ctxBktWeb     = new ToolStripMenuItem("Static Website Hosting…");
         var ctxBktProps   = new ToolStripMenuItem("Properties…");
 
         // ── Change Storage Class submenu ──────────────────────────────────────
@@ -257,6 +258,7 @@ public class MainForm : Form
         ctxRemoveExt.Click += (_, _) => BeginInvoke(DoRemoveExternalBucket);
         ctxAddExt.Click    += (_, _) => BeginInvoke(DoAddExternalBucket);
         ctxBktAccess.Click += (_, _) => BeginInvoke(DoShowBucketPublicAccess);
+        ctxBktWeb.Click    += (_, _) => BeginInvoke(DoShowStaticWebsite);
         ctxBktProps.Click  += (_, _) => BeginInvoke(DoShowBucketProperties);
         ctxBuckets.Items.AddRange(new ToolStripItem[]
         {
@@ -268,7 +270,7 @@ public class MainForm : Form
             new ToolStripSeparator(),
             ctxAddExt,
             new ToolStripSeparator(),
-            ctxBktAccess, ctxBktProps
+            ctxBktAccess, ctxBktWeb, ctxBktProps
         });
         ctxBuckets.Opening += (_, _) =>
         {
@@ -284,6 +286,7 @@ public class MainForm : Form
             ctxRemoveExt.Visible   = isExternal;
             ctxAddExt.Enabled      = _s3 != null;
             ctxBktAccess.Enabled   = hasBucket;
+            ctxBktWeb.Enabled      = hasBucket;
             ctxBktProps.Enabled    = hasBucket;
         };
         lstBuckets.ContextMenuStrip = ctxBuckets;
@@ -1553,6 +1556,13 @@ public class MainForm : Form
     {
         if (_s3 == null || lstBuckets.SelectedItem is not string bucket) return;
         using var dlg = new PublicAccessForm(_s3, bucket);
+        dlg.ShowDialog(this);
+    }
+
+    private void DoShowStaticWebsite()
+    {
+        if (_s3 == null || lstBuckets.SelectedItem is not string bucket) return;
+        using var dlg = new StaticWebsiteForm(_s3, bucket);
         dlg.ShowDialog(this);
     }
 

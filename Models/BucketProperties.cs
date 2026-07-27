@@ -18,6 +18,7 @@ public class BucketProperties
     public string    TransferAcceleration        { get; set; } = "";
     public string    Encryption                  { get; set; } = "";
     public string    RequesterPays               { get; set; } = "";
+    public string    StaticWebsite               { get; set; } = "";
     public List<string> FileTypes               { get; set; } = new();
     public List<string> StorageClasses          { get; set; } = new();
     public DateTime? ModifiedFrom               { get; set; }
