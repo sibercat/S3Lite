@@ -51,7 +51,7 @@ public class StaticWebsiteForm : Form
             Dock        = DockStyle.Fill,
             Padding     = new Padding(12),
             ColumnCount = 2,
-            RowCount    = 13,
+            RowCount    = 14,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -148,14 +148,17 @@ public class StaticWebsiteForm : Form
         layout.Controls.Add(urlButtons, 1, 11);
 
         // ── Status + actions ──────────────────────────────────────────────────
+        // Spans both columns and wraps — status messages are full sentences and
+        // would be clipped by the 130px label column
         lblStatus = new Label
         {
-            Text      = "Loading…",
-            Dock      = DockStyle.Fill,
-            ForeColor = SystemColors.GrayText,
-            Margin    = new Padding(0, 8, 0, 0)
+            Text        = "Loading…",
+            AutoSize    = true,
+            MaximumSize = new Size(560, 0),
+            ForeColor   = SystemColors.GrayText,
+            Margin      = new Padding(0, 8, 0, 4)
         };
-        layout.Controls.Add(lblStatus, 0, 12);
+        AddSpan(layout, 12, lblStatus);
 
         var actions = new FlowLayoutPanel
         {
@@ -168,7 +171,7 @@ public class StaticWebsiteForm : Form
         btnSave = new Button { Text = "✔ Save", Width = 95, Height = 28, Enabled = false };
         btnSave.Click += async (_, _) => await SaveAsync();
         actions.Controls.AddRange(new Control[] { btnClose, btnSave });
-        layout.Controls.Add(actions, 1, 12);
+        layout.Controls.Add(actions, 1, 13);
 
         Controls.Add(layout);
         CancelButton = btnClose;
@@ -214,10 +217,14 @@ public class StaticWebsiteForm : Form
     {
         try
         {
+            // Only the website config is essential — the rest are advisory, so a
+            // missing s3:GetBucketPolicy / GetPublicAccessBlock permission must
+            // not stop the dialog from loading
             var cfgTask    = _s3.GetWebsiteConfigAsync(_bucket);
-            var regionTask = _s3.GetBucketRegionAsync(_bucket);
-            var accessTask = _s3.GetBucketAccessSettingsAsync(_bucket);
-            var policyTask = _s3.HasPublicReadPolicyAsync(_bucket);
+            var regionTask = Safe(_s3.GetBucketRegionAsync(_bucket), "us-east-1");
+            var accessTask = Safe(_s3.GetBucketAccessSettingsAsync(_bucket),
+                                  new BucketAccessSettings(false, false));
+            var policyTask = Safe(_s3.HasPublicReadPolicyAsync(_bucket), false);
             await Task.WhenAll(cfgTask, regionTask, accessTask, policyTask);
 
             var cfg = cfgTask.Result;
@@ -367,6 +374,13 @@ public class StaticWebsiteForm : Form
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+    /// <summary>Awaits a task, falling back to a default if it throws.</summary>
+    private static async Task<T> Safe<T>(Task<T> task, T fallback)
+    {
+        try { return await task.ConfigureAwait(false); }
+        catch { return fallback; }
+    }
+
     private static string FriendlyError(Exception ex)
     {
         if (ex is AmazonS3Exception s3x)

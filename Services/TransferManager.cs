@@ -121,14 +121,40 @@ public class TransferManager : IDisposable
         job.NotifyChanged();
 
         // Abort any in-progress multipart upload regardless of prior state
-        // (running, paused, or failed) — orphaned parts accrue storage costs
-        if (job.Direction == TransferDirection.Upload && job.UploadId != null)
+        // (running, paused, or failed) — orphaned parts accrue storage costs.
+        // CompletedParts is deliberately not cleared: in-flight part tasks may
+        // still be appending to it under _partsLock, and a Cancelled job is
+        // terminal so the list is never read again.
+        _ = AbortIfMultipartAsync(job);
+    }
+
+    private Task AbortIfMultipartAsync(TransferJob job)
+    {
+        if (job.Direction != TransferDirection.Upload || job.UploadId == null)
+            return Task.CompletedTask;
+        var uploadId = job.UploadId;
+        job.UploadId = null;
+        return _s3.AbortMultipartUploadAsync(job.Bucket, job.Key, uploadId);
+    }
+
+    /// <summary>
+    /// Cancels jobs and waits for their multipart aborts to reach S3. Used on
+    /// shutdown, where firing the aborts and immediately disposing the client
+    /// would cancel the requests and leave the parts orphaned.
+    /// </summary>
+    public async Task CancelAndAbortAsync(IEnumerable<TransferJob> jobs)
+    {
+        var aborts = new List<Task>();
+        foreach (var job in jobs)
         {
-            var uploadId = job.UploadId;
-            job.UploadId = null;
-            job.CompletedParts.Clear();
-            _ = _s3.AbortMultipartUploadAsync(job.Bucket, job.Key, uploadId);
+            job.Status = TransferStatus.Cancelled;
+            job.Cts.Cancel();
+            job.NotifyChanged();
+            aborts.Add(AbortIfMultipartAsync(job));
         }
+        // Don't hang shutdown indefinitely if S3 is unreachable
+        await Task.WhenAny(Task.WhenAll(aborts), Task.Delay(TimeSpan.FromSeconds(8)))
+                  .ConfigureAwait(false);
     }
 
     public void ClearCompleted()

@@ -899,8 +899,12 @@ public class MainForm : Form
                 MessageBoxDefaultButton.Button2);
             if (confirm != DialogResult.Yes) { e.Cancel = true; return; }
 
-            // Cancel so any in-progress multipart uploads are aborted (no orphaned parts)
-            foreach (var job in active) _transferManager!.Cancel(job);
+            // Block until the aborts actually reach S3 (bounded internally) —
+            // disposing the client first would cancel them and orphan the parts
+            Cursor = Cursors.WaitCursor;
+            try   { _transferManager!.CancelAndAbortAsync(active).GetAwaiter().GetResult(); }
+            catch { /* shutting down anyway */ }
+            finally { Cursor = Cursors.Default; }
         }
 
         if (_mouseNavFilter != null) Application.RemoveMessageFilter(_mouseNavFilter);

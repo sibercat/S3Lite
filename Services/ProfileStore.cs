@@ -32,7 +32,12 @@ public static class ProfileStore
             return Encoding.UTF8.GetString(
                 ProtectedData.Unprotect(bytes, null, DataProtectionScope.CurrentUser));
         }
-        catch { return ""; } // different Windows user/machine — key unrecoverable
+        // Decryption fails when the blob came from a different Windows user or
+        // machine. Return it untouched rather than "" — Protect() passes an
+        // already-prefixed value straight through, so a later Save round-trips
+        // it instead of overwriting the only copy with an empty string. The
+        // connection then fails with an auth error and the user can re-enter it.
+        catch { return stored; }
     }
 
     public static List<S3Connection> Load()
