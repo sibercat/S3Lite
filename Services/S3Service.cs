@@ -19,10 +19,20 @@ public record BucketAccessSettings(
 );
 
 /// <summary>S3 static website hosting configuration for a bucket.</summary>
+/// <param name="RoutingRules">
+/// Redirect rules S3 Lite does not edit. Carried through on save so they are
+/// never silently dropped by a PutBucketWebsite that replaces the whole config.
+/// </param>
+/// <param name="RedirectAllTo">
+/// Set when the bucket redirects every request to another host. In this mode
+/// index/error documents do not apply and must not be overwritten.
+/// </param>
 public record WebsiteConfig(
-    bool   Enabled,
-    string IndexDocument,
-    string ErrorDocument
+    bool    Enabled,
+    string  IndexDocument,
+    string  ErrorDocument,
+    List<Amazon.S3.Model.RoutingRule> RoutingRules,
+    string? RedirectAllTo
 );
 
 /// <summary>A CloudFront distribution whose origin points at a given bucket.</summary>
@@ -1170,22 +1180,40 @@ public async Task DownloadFileAsync(string bucket, string key, string localPath,
             var resp = await ClientFor(bucket).GetBucketWebsiteAsync(
                 new GetBucketWebsiteRequest { BucketName = bucket }).ConfigureAwait(false);
             var cfg = resp.WebsiteConfiguration;
+
+            string? redirectAll = null;
+            if (cfg?.RedirectAllRequestsTo?.HostName is { Length: > 0 } host)
+            {
+                string proto = string.IsNullOrEmpty(cfg.RedirectAllRequestsTo.Protocol)
+                    ? "http" : cfg.RedirectAllRequestsTo.Protocol;
+                redirectAll  = $"{proto}://{host}";
+            }
+
             return new WebsiteConfig(
                 true,
-                cfg?.IndexDocumentSuffix          ?? "index.html",
-                cfg?.ErrorDocument                ?? "");
+                cfg?.IndexDocumentSuffix ?? "index.html",
+                cfg?.ErrorDocument       ?? "",
+                cfg?.RoutingRules        ?? new List<RoutingRule>(),
+                redirectAll);
         }
         catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchWebsiteConfiguration")
         {
-            return new WebsiteConfig(false, "index.html", "error.html");
+            return new WebsiteConfig(false, "index.html", "error.html", new List<RoutingRule>(), null);
         }
     }
 
-    public async Task EnableWebsiteAsync(string bucket, string indexDocument, string errorDocument)
+    /// <summary>
+    /// Enables website hosting. Any existing redirect rules must be passed in so
+    /// they survive — PutBucketWebsite replaces the entire configuration.
+    /// </summary>
+    public async Task EnableWebsiteAsync(string bucket, string indexDocument, string errorDocument,
+        List<RoutingRule>? preserveRoutingRules = null)
     {
         var cfg = new WebsiteConfiguration { IndexDocumentSuffix = indexDocument };
         if (!string.IsNullOrWhiteSpace(errorDocument))
             cfg.ErrorDocument = errorDocument;
+        if (preserveRoutingRules is { Count: > 0 })
+            cfg.RoutingRules = preserveRoutingRules;
 
         await ClientFor(bucket).PutBucketWebsiteAsync(new PutBucketWebsiteRequest
         {

@@ -13,11 +13,16 @@ public class StaticWebsiteForm : Form
     private bool   _hasPolicy    = false;
     private bool   _wasEnabled   = false;
 
+    // Config S3 Lite does not edit but must not destroy on save
+    private List<Amazon.S3.Model.RoutingRule> _routingRules = new();
+    private string? _redirectAllTo;
+
     private CheckBox chkEnable      = null!;
     private TextBox  txtIndex       = null!;
     private TextBox  txtError       = null!;
     private TextBox  txtUrl         = null!;
     private Label    lblAccess      = null!;
+    private Label    lblAdvanced    = null!;
     private Button   btnMakePublic  = null!;
     private Button   btnCopyUrl     = null!;
     private Button   btnOpenUrl     = null!;
@@ -46,7 +51,7 @@ public class StaticWebsiteForm : Form
             Dock        = DockStyle.Fill,
             Padding     = new Padding(12),
             ColumnCount = 2,
-            RowCount    = 12,
+            RowCount    = 13,
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -68,11 +73,21 @@ public class StaticWebsiteForm : Form
         AddRow(layout, 1, "Index document:", txtIndex);
         AddRow(layout, 2, "Error document:", txtError);
 
-        AddSpan(layout, 3, Hint(
+        lblAdvanced = new Label
+        {
+            AutoSize  = true,
+            Visible   = false,
+            ForeColor = Color.DarkOrange,
+            Font      = new Font(Font.FontFamily, 7.5f, FontStyle.Bold),
+            Margin    = new Padding(0, 0, 0, 4)
+        };
+        AddSpan(layout, 3, lblAdvanced);
+
+        AddSpan(layout, 4, Hint(
             "The index document is served for requests to a folder (e.g. /about/ → /about/index.html).\n" +
             "The error document is optional — leave blank to use the default S3 error page."));
 
-        AddSpan(layout, 4, Separator());
+        AddSpan(layout, 5, Separator());
 
         // ── Public access ─────────────────────────────────────────────────────
         lblAccess = new Label
@@ -81,7 +96,7 @@ public class StaticWebsiteForm : Form
             AutoSize = true,
             Margin   = new Padding(0, 4, 0, 2)
         };
-        AddSpan(layout, 5, lblAccess);
+        AddSpan(layout, 6, lblAccess);
 
         btnMakePublic = new Button
         {
@@ -92,14 +107,14 @@ public class StaticWebsiteForm : Form
             AutoSize = false
         };
         btnMakePublic.Click += async (_, _) => await ApplyPolicyAsync();
-        AddSpan(layout, 6, btnMakePublic);
+        AddSpan(layout, 7, btnMakePublic);
 
-        AddSpan(layout, 7, Hint(
+        AddSpan(layout, 8, Hint(
             "A website endpoint serves anonymous requests, so objects must be publicly readable.\n" +
             "This applies a bucket policy granting s3:GetObject to everyone — the method AWS\n" +
             "recommends over per-file ACLs."));
 
-        AddSpan(layout, 8, Separator());
+        AddSpan(layout, 9, Separator());
 
         // ── Endpoint ──────────────────────────────────────────────────────────
         txtUrl = new TextBox
@@ -108,7 +123,7 @@ public class StaticWebsiteForm : Form
             ReadOnly  = true,
             BackColor = SystemColors.Control
         };
-        AddRow(layout, 9, "Website URL:", txtUrl);
+        AddRow(layout, 10, "Website URL:", txtUrl);
 
         var urlButtons = new FlowLayoutPanel
         {
@@ -130,7 +145,7 @@ public class StaticWebsiteForm : Form
                 new System.Diagnostics.ProcessStartInfo(txtUrl.Text) { UseShellExecute = true });
         };
         urlButtons.Controls.AddRange(new Control[] { btnCopyUrl, btnOpenUrl });
-        layout.Controls.Add(urlButtons, 1, 10);
+        layout.Controls.Add(urlButtons, 1, 11);
 
         // ── Status + actions ──────────────────────────────────────────────────
         lblStatus = new Label
@@ -140,7 +155,7 @@ public class StaticWebsiteForm : Form
             ForeColor = SystemColors.GrayText,
             Margin    = new Padding(0, 8, 0, 0)
         };
-        layout.Controls.Add(lblStatus, 0, 11);
+        layout.Controls.Add(lblStatus, 0, 12);
 
         var actions = new FlowLayoutPanel
         {
@@ -153,7 +168,7 @@ public class StaticWebsiteForm : Form
         btnSave = new Button { Text = "✔ Save", Width = 95, Height = 28, Enabled = false };
         btnSave.Click += async (_, _) => await SaveAsync();
         actions.Controls.AddRange(new Control[] { btnClose, btnSave });
-        layout.Controls.Add(actions, 1, 11);
+        layout.Controls.Add(actions, 1, 12);
 
         Controls.Add(layout);
         CancelButton = btnClose;
@@ -206,10 +221,12 @@ public class StaticWebsiteForm : Form
             await Task.WhenAll(cfgTask, regionTask, accessTask, policyTask);
 
             var cfg = cfgTask.Result;
-            _region      = regionTask.Result;
-            _blockPublic = accessTask.Result.BlockPublicAccess;
-            _hasPolicy   = policyTask.Result;
-            _wasEnabled  = cfg.Enabled;
+            _region        = regionTask.Result;
+            _blockPublic   = accessTask.Result.BlockPublicAccess;
+            _hasPolicy     = policyTask.Result;
+            _wasEnabled    = cfg.Enabled;
+            _routingRules  = cfg.RoutingRules;
+            _redirectAllTo = cfg.RedirectAllTo;
 
             chkEnable.Checked = cfg.Enabled;
             txtIndex.Text     = cfg.IndexDocument;
@@ -218,6 +235,7 @@ public class StaticWebsiteForm : Form
 
             chkEnable.Enabled = true;
             btnSave.Enabled   = true;
+            UpdateAdvancedLabel();
             UpdateEnabledState();
             UpdateAccessLabel();
             SetStatus(cfg.Enabled
@@ -230,13 +248,28 @@ public class StaticWebsiteForm : Form
         }
     }
 
+    private void UpdateAdvancedLabel()
+    {
+        var notes = new List<string>();
+        if (_redirectAllTo != null)
+            notes.Add($"This bucket redirects all requests to {_redirectAllTo}. Index/error documents " +
+                      "do not apply and are not editable here; you can still disable hosting.");
+        if (_routingRules.Count > 0)
+            notes.Add($"{_routingRules.Count} redirect rule(s) configured — these are preserved on save.");
+
+        lblAdvanced.Text    = string.Join(Environment.NewLine, notes);
+        lblAdvanced.Visible = notes.Count > 0;
+    }
+
     private void UpdateEnabledState()
     {
-        bool on = chkEnable.Checked;
-        txtIndex.Enabled   = on;
-        txtError.Enabled   = on;
-        btnCopyUrl.Enabled = on;
-        btnOpenUrl.Enabled = on;
+        // In redirect-all mode the document fields are meaningless — keep them
+        // locked so Save can't replace that configuration with an index document
+        bool editable = chkEnable.Checked && _redirectAllTo == null;
+        txtIndex.Enabled   = editable;
+        txtError.Enabled   = editable;
+        btnCopyUrl.Enabled = chkEnable.Checked;
+        btnOpenUrl.Enabled = chkEnable.Checked;
     }
 
     private void UpdateAccessLabel()
@@ -295,6 +328,12 @@ public class StaticWebsiteForm : Form
         {
             if (chkEnable.Checked)
             {
+                if (_redirectAllTo != null)
+                {
+                    SetStatus($"Bucket redirects all requests to {_redirectAllTo} — nothing to change. " +
+                              "Uncheck the box to disable hosting.");
+                    return;
+                }
                 string index = txtIndex.Text.Trim();
                 if (index.Length == 0)
                 {
@@ -302,7 +341,8 @@ public class StaticWebsiteForm : Form
                     return;
                 }
                 SetStatus("Enabling website hosting…");
-                await _s3.EnableWebsiteAsync(_bucket, index, txtError.Text.Trim());
+                // Pass existing redirect rules so PutBucketWebsite doesn't drop them
+                await _s3.EnableWebsiteAsync(_bucket, index, txtError.Text.Trim(), _routingRules);
                 _wasEnabled = true;
                 SetStatus(_hasPolicy
                     ? "Website hosting enabled. Your site is live at the URL above."
